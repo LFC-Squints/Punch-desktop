@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Punch
 
 A self-hosted desktop time tracker that stays out of your way.
@@ -92,3 +93,6 @@ Neither is required for personal/small-team use.
 ## License
 
 MIT
+=======
+# Punch-desktop
+>>>>>>> 12e626f849faf31c6d02cad106b4ba3d25f71ed8
