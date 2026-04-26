@@ -4,7 +4,7 @@ A self-hosted desktop time tracker that stays out of your way.
 
 ## Install
 
-**[📥 Download Punch Setup 1.2.0.exe](https://github.com/LFC-Squints/punch-desktop/releases/latest)**
+**[📥 Download Punch Setup 1.2.0.exe](https://github.com/LFC-Squints/punch-desktop/releases/download/v1.2.0/Punch-Setup-1.2.0.exe)**
 
 Run the installer. Windows SmartScreen will warn you (unsigned app) — click **More info → Run anyway**.
 
