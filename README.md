@@ -1,1 +1,1 @@
-# Punch-app
+# Punch-desktop
