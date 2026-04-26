@@ -1,0 +1,47 @@
+{
+  "name": "punch-desktop",
+  "version": "1.2.0",
+  "description": "Self-hosted desktop time tracker with subcategories, tasks, accounts, hotkeys, and AI summary export",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "dist": "electron-builder --win",
+    "dist:publish": "electron-builder --win --publish always"
+  },
+  "author": "Justin",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3"
+  },
+  "dependencies": {
+    "active-win": "^7.7.2",
+    "electron-updater": "^6.3.9"
+  },
+  "build": {
+    "appId": "com.justin.punch",
+    "productName": "Punch",
+    "directories": { "output": "dist" },
+    "files": [ "main.js", "preload.js", "renderer/**/*", "assets/**/*" ],
+    "win": {
+      "target": [ "nsis", "portable" ],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Punch"
+    },
+    "portable": {
+      "artifactName": "Punch-Portable-${version}.exe"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "LFC-Squints",
+      "repo": "punch-desktop"
+    }
+  }
+}

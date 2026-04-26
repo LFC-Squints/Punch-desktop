@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Punch</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body class="widget-mode aot-on">
+
+  <header class="titlebar">
+    <div class="brand">
+      <span class="brand-mark">PUNCH</span>
+      <span id="brandTag" class="brand-tag">widget</span>
+    </div>
+    <div class="titlebar-actions">
+      <button class="tb-btn" id="btnPin" title="Always on top">
+        <svg viewBox="0 0 16 16" width="14" height="14"><path d="M9 1l5 5-3 1-1 4-4-4-4 1 1-4-4-4 4 1 4-4z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
+      </button>
+      <button class="tb-btn" id="btnExpand" title="Expand to full view">
+        <svg viewBox="0 0 16 16" width="14" height="14"><rect x="2" y="2" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>
+      </button>
+      <button class="tb-btn" id="btnMinimize" title="Minimize">
+        <svg viewBox="0 0 16 16" width="14" height="14"><line x1="3" y1="11" x2="13" y2="11" stroke="currentColor" stroke-width="1.4"/></svg>
+      </button>
+      <button class="tb-btn tb-close" id="btnClose" title="Hide to tray">
+        <svg viewBox="0 0 16 16" width="14" height="14"><line x1="4" y1="4" x2="12" y2="12" stroke="currentColor" stroke-width="1.4"/><line x1="12" y1="4" x2="4" y2="12" stroke="currentColor" stroke-width="1.4"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <section id="timerWidget" class="timer-widget">
+    <div class="timer-row">
+      <div class="readout-block">
+        <div class="status">
+          <span class="status-dot"></span>
+          <span id="statusText">Stopped</span>
+        </div>
+        <div id="readout" class="readout">00:00:00</div>
+        <div id="activeTaskBadge" class="active-task-badge hidden"></div>
+      </div>
+      <button id="btnTimer" class="btn-timer">START</button>
+    </div>
+
+    <div class="select-row-3">
+      <select id="projectSel" class="punch-select"></select>
+      <select id="subcatSel" class="punch-select"></select>
+      <button class="icon-btn amber" id="btnQuickAddSubcat" title="Add subcategory to current project">+</button>
+    </div>
+
+    <div class="account-row">
+      <select id="accountSel" class="punch-select"></select>
+    </div>
+
+   <textarea id="notesInput" class="notes-input" placeholder="context about the thing" maxlength="1000" rows="2"></textarea>
+    <div id="autodetectStatus" class="autodetect-status hidden">
+      <span class="ad-dot"></span>
+      <span id="adText"></span>
+      <button id="btnAdApply" class="btn-mini">Apply</button>
+    </div>
+
+    <div id="updateBanner" class="update-banner hidden">
+      <span id="updateBannerText"></span>
+      <button id="btnUpdateBannerAction" class="btn-mini"></button>
+    </div>
+  </section>
+
+  <section id="fullView" class="full-view">
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="today">Today</button>
+      <button class="tab" data-tab="tasks">Tasks</button>
+      <button class="tab" data-tab="projects">Projects</button>
+      <button class="tab" data-tab="summary">AI Summary</button>
+      <button class="tab" data-tab="settings">Settings</button>
+    </nav>
+
+    <!-- TODAY -->
+    <div class="tab-pane active" data-pane="today">
+      <div class="totals">
+        <div class="total-cell"><div class="total-label">Today</div><div id="totalToday" class="total-value">0:00</div></div>
+        <div class="total-cell"><div class="total-label">This week</div><div id="totalWeek" class="total-value">0:00</div></div>
+        <div class="total-cell"><div class="total-label">Last 30 days</div><div id="totalMonth" class="total-value">0:00</div></div>
+      </div>
+      <div class="entries-toolbar">
+        <button class="btn" id="btnManualEntry">+ Manual entry</button>
+        <button class="btn" id="btnExportCSV">Export CSV</button>
+        <input type="text" id="entrySearch" class="search-input" placeholder="Search entries…" />
+      </div>
+      <div id="entriesList" class="entries-list"></div>
+    </div>
+
+    <!-- TASKS -->
+    <div class="tab-pane" data-pane="tasks">
+      <div class="entries-toolbar">
+        <button class="btn btn-primary" id="btnAddTask">+ New task</button>
+        <div class="task-filters">
+          <button class="task-filter active" data-filter="active">Active</button>
+          <button class="task-filter" data-filter="all">All</button>
+          <button class="task-filter" data-filter="completed">Completed</button>
+        </div>
+      </div>
+      <div id="tasksList" class="tasks-list"></div>
+    </div>
+
+    <!-- PROJECTS -->
+    <div class="tab-pane" data-pane="projects">
+      <div class="entries-toolbar">
+        <button class="btn btn-primary" id="btnAddProject">+ New project</button>
+      </div>
+      <div id="projectsList" class="projects-list"></div>
+    </div>
+
+    <!-- AI SUMMARY -->
+    <div class="tab-pane" data-pane="summary">
+      <div class="summary-controls">
+        <div class="field-inline">
+          <label class="field-label">Range</label>
+          <select id="summaryRange" class="punch-select">
+            <option value="thisWeek">This week (Sun–Sat)</option>
+            <option value="lastWeek">Last week</option>
+            <option value="last7">Last 7 days</option>
+            <option value="last14">Last 14 days</option>
+            <option value="last30">Last 30 days</option>
+            <option value="custom">Custom…</option>
+          </select>
+        </div>
+        <div class="field-inline hidden" id="customRangeRow">
+          <input id="rangeStart" type="date" />
+          <span style="color:var(--text-faint)">to</span>
+          <input id="rangeEnd" type="date" />
+        </div>
+        <div class="field-inline">
+          <label class="checkbox"><input type="checkbox" id="includePromptHeader" checked /><span>Prepend AI prompt instruction</span></label>
+        </div>
+        <div class="field-inline">
+          <label class="checkbox"><input type="checkbox" id="includeFullEntries" checked /><span>Include detailed entry table</span></label>
+        </div>
+      </div>
+      <div class="summary-actions">
+        <button class="btn btn-primary" id="btnGenerate">Generate</button>
+        <button class="btn" id="btnCopyMd">Copy as Markdown</button>
+        <button class="btn" id="btnCopyJson">Copy as JSON</button>
+        <button class="btn" id="btnSendWebhook">Send to webhook</button>
+      </div>
+      <textarea id="summaryOutput" class="summary-output mono" placeholder="Click Generate to build the digest…" spellcheck="false"></textarea>
+    </div>
+
+    <!-- SETTINGS -->
+    <div class="tab-pane" data-pane="settings">
+
+      <!-- UPDATES -->
+      <div class="settings-section">
+        <div class="settings-title">About &amp; updates</div>
+        <div class="field-inline">
+          <span class="hint-inline">Version <span id="appVersion" class="mono" style="color:var(--text)">…</span></span>
+          <button class="btn" id="btnCheckUpdate">Check for updates</button>
+          <button class="btn" id="btnShowShortcuts">Keyboard shortcuts</button>
+        </div>
+        <div id="updateStatus" class="update-status"></div>
+      </div>
+
+      <!-- ACCOUNTS -->
+      <div class="settings-section">
+        <div class="settings-title">
+          <span id="accountLabelTitle">Accounts</span>
+          <span class="hint-inline">— a dropdown shown on every entry</span>
+        </div>
+        <div class="field-inline" style="margin-bottom:10px">
+          <label class="field-label">Field label</label>
+          <input id="accountLabelInput" type="text" placeholder="e.g. Shop, Client, Franchise" style="width:200px" maxlength="30" />
+          <button class="btn" id="btnSetAccountLabel">Apply</button>
+        </div>
+        <div class="hint-text" style="margin-bottom:10px">
+          Rename this field to fit your context: "Shop", "Client", "Account", "Franchise Owner" — whatever works.
+        </div>
+        <div id="accountsList" class="accounts-list"></div>
+        <div class="field-inline" style="margin-top:8px">
+          <input id="newAccountInput" type="text" placeholder="e.g. Steve (the good one, not finance Steve)" maxlength="80" style="flex:1" />
+          <button class="btn btn-primary" id="btnAddAccount">Add</button>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-title">Hotkey</div>
+        <div class="field-inline">
+          <input id="hotkeyInput" class="punch-select" type="text" placeholder="CommandOrControl+Alt+P" style="width:280px"/>
+          <button class="btn" id="btnSetHotkey">Apply</button>
+          <span id="hotkeyStatus" class="hint-inline"></span>
+        </div>
+        <div class="hint-text">Modifiers: <span class="kbd">CommandOrControl</span>, <span class="kbd">Alt</span>, <span class="kbd">Shift</span>. Triggers the timer globally + focuses notes field.</div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-title">Always on top</div>
+        <label class="checkbox"><input type="checkbox" id="aotToggle" checked /><span>Pin the widget above other windows</span></label>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-title">Idle detection</div>
+        <label class="checkbox"><input type="checkbox" id="idleToggle" checked /><span>Detect when I step away</span></label>
+        <div class="field-inline" style="margin-top:8px">
+          <label class="field-label">Threshold</label>
+          <input id="idleThreshold" type="number" min="1" max="120" step="1" style="width:80px" />
+          <span style="color:var(--text-dim)">minutes</span>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-title">Autodetect <span id="adAvailability" class="hint-inline"></span></div>
+        <label class="checkbox"><input type="checkbox" id="autodetectToggle" /><span>Watch the active window and match against rules</span></label>
+        <div class="rules-table" id="rulesTable"></div>
+        <button class="btn" id="btnAddRule">+ Add rule</button>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-title">n8n / Webhook</div>
+        <div class="field-inline">
+          <input id="webhookUrl" class="punch-select" type="text" placeholder="https://your-n8n-instance/webhook/…" style="flex:1;min-width:300px"/>
+          <button class="btn" id="btnTestWebhook">Test</button>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-title">Data &amp; backup</div>
+        <div class="field-inline" style="flex-wrap:wrap;gap:8px">
+          <button class="btn" id="btnExportJson">Export JSON backup</button>
+          <button class="btn" id="btnImportJson">Import JSON backup</button>
+          <input id="importFile" type="file" accept="application/json" hidden />
+          <button class="btn" id="btnOpenDataDir">Open data folder</button>
+        </div>
+        <div class="hint-text" id="dataPathHint">Data file: <span class="mono"></span></div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-title">Danger zone</div>
+        <button class="btn btn-danger" id="btnWipe">Wipe all data</button>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- Project modal -->
+  <div id="projectModal" class="modal-overlay">
+    <div class="modal">
+      <div class="modal-title" id="projectModalTitle">New project</div>
+      <div class="field"><label class="field-label">Name</label><input id="projectName" type="text" placeholder="e.g. That thing we said we'd ship last quarter" maxlength="80" /></div>
+      <div class="field"><label class="field-label">Color</label><div id="swatchGrid" class="swatch-grid"></div></div>
+      <div class="field">
+        <label class="field-label">Subcategories</label>
+        <div id="subcatEditor" class="subcat-editor"></div>
+        <div class="field-inline" style="margin-top:8px">
+          <input id="newSubcatInput" type="text" placeholder="e.g. Meetings that could've been emails" maxlength="60" style="flex:1" />
+          <button class="btn" id="btnAddSubcat">Add</button>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-danger" id="btnDeleteProject" style="margin-right:auto">Delete project</button>
+        <button class="btn" data-close="projectModal">Cancel</button>
+        <button class="btn btn-primary" id="btnSaveProject">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Entry modal -->
+  <div id="entryModal" class="modal-overlay">
+    <div class="modal">
+      <div class="modal-title" id="entryModalTitle">Manual entry</div>
+      <div class="row-2">
+        <div class="field"><label class="field-label">Project</label><select id="entryProject" class="punch-select"></select></div>
+        <div class="field">
+          <label class="field-label">Subcategory <button class="quick-add-btn" id="btnEntryQuickAddSubcat" title="Add subcategory">+</button></label>
+          <select id="entrySubcat" class="punch-select"></select>
+        </div>
+      </div>
+      <div class="field"><label class="field-label" id="entryAccountLabel">Account</label><select id="entryAccount" class="punch-select"></select></div>
+      <div class="field"><label class="field-label">Notes</label><input id="entryNotes" type="text" placeholder="Optional comments" maxlength="240" /></div>
+      <div class="row-2">
+        <div class="field"><label class="field-label">Start date</label><input id="entryStartDate" type="date" /></div>
+        <div class="field"><label class="field-label">Start time</label><input id="entryStartTime" type="time" /></div>
+      </div>
+      <div class="row-2">
+        <div class="field"><label class="field-label">End date</label><input id="entryEndDate" type="date" /></div>
+        <div class="field"><label class="field-label">End time</label><input id="entryEndTime" type="time" /></div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-danger" id="btnDeleteEntry" style="margin-right:auto">Delete</button>
+        <button class="btn" data-close="entryModal">Cancel</button>
+        <button class="btn btn-primary" id="btnSaveEntry">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Task modal -->
+  <div id="taskModal" class="modal-overlay">
+    <div class="modal">
+      <div class="modal-title" id="taskModalTitle">New task</div>
+      <div class="field"><label class="field-label">Task name</label><input id="taskName" type="text" placeholder="e.g. Refactor the refactor" maxlength="120" /></div>
+      <div class="row-2">
+        <div class="field"><label class="field-label">Project</label><select id="taskProject" class="punch-select"></select></div>
+        <div class="field"><label class="field-label">Subcategory</label><select id="taskSubcat" class="punch-select"></select></div>
+      </div>
+      <div class="field"><label class="field-label" id="taskAccountLabel">Account</label><select id="taskAccount" class="punch-select"></select></div>
+      <div class="field"><label class="field-label">Notes / context</label><textarea id="taskNotes" placeholder="Details, links, next steps…" rows="4" style="width:100%;resize:vertical"></textarea></div>
+      <div class="modal-actions">
+        <button class="btn btn-danger" id="btnDeleteTask" style="margin-right:auto">Delete</button>
+        <button class="btn" data-close="taskModal">Cancel</button>
+        <button class="btn btn-primary" id="btnSaveTask">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Idle modal -->
+  <div id="idleModal" class="modal-overlay">
+    <div class="modal">
+      <div class="modal-title">Welcome back</div>
+      <p style="color:var(--text-dim);margin-bottom:14px">You were idle for <span id="idleDuration" class="mono" style="color:var(--text)"></span> while a timer was running. What would you like to do?</p>
+      <div class="modal-actions" style="flex-wrap:wrap;gap:8px">
+        <button class="btn" id="btnIdleKeep">Keep the time</button>
+        <button class="btn" id="btnIdleDiscard">Discard idle minutes</button>
+        <button class="btn btn-danger" id="btnIdleStop">Stop timer at idle start</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Rule modal -->
+  <div id="ruleModal" class="modal-overlay">
+    <div class="modal">
+      <div class="modal-title" id="ruleModalTitle">New autodetect rule</div>
+      <div class="field">
+        <label class="field-label">When window matches (case-insensitive)</label>
+        <input id="rulePattern" type="text" placeholder="e.g. POS Manager" maxlength="120" />
+      </div>
+      <div class="field"><label class="field-label">Project</label><select id="ruleProject" class="punch-select"></select></div>
+      <div class="field"><label class="field-label">Subcategory</label><select id="ruleSubcat" class="punch-select"></select></div>
+      <div class="field">
+        <label class="field-label">Action</label>
+        <select id="ruleAction" class="punch-select">
+          <option value="suggest">Suggest (one-tap apply)</option>
+          <option value="autostart">Auto-start timer</option>
+        </select>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-danger" id="btnDeleteRule" style="margin-right:auto">Delete</button>
+        <button class="btn" data-close="ruleModal">Cancel</button>
+        <button class="btn btn-primary" id="btnSaveRule">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Shortcuts modal -->
+  <div id="shortcutsModal" class="modal-overlay">
+    <div class="modal">
+      <div class="modal-title">Keyboard shortcuts</div>
+      <table class="shortcuts-table">
+        <tr><td><span class="kbd">Ctrl+Alt+P</span></td><td>Start / stop timer (global) &amp; focus notes</td></tr>
+        <tr><td><span class="kbd">Space</span></td><td>Start / stop timer (when window focused, not in a field)</td></tr>
+        <tr><td><span class="kbd">Esc</span></td><td>Close any open modal</td></tr>
+        <tr><td><span class="kbd">Enter</span></td><td>Add subcategory / account (when in that input field)</td></tr>
+        <tr><td><span class="kbd">Ctrl+R</span></td><td>Reload app (for dev use after editing files)</td></tr>
+      </table>
+      <p class="hint-text">The global hotkey can be changed in Settings.</p>
+      <div class="modal-actions"><button class="btn btn-primary" data-close="shortcutsModal">Got it</button></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+  <script src="app.js"></script>
+</body>
+</html>
