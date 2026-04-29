@@ -1,5 +1,5 @@
 // ============================================================
-// Punch — renderer logic v1.2
+// Punch — renderer logic v1.2.1
 // ============================================================
 
 const SWATCH_PALETTE = [
@@ -530,17 +530,34 @@ function bindActiveTimerInputs(){
 // Quick-add subcategory
 // ------------------------------------------------------------
 function quickAddSubcat(projectId, onAdded){
-  const p=getProject(projectId); if(!p){ toast('Select a project first'); return; }
-  const name=prompt(`Add subcategory to "${p.name}":`);
-  if(!name||!name.trim()) return;
-  const sc={ id:nextId('sc'), name:name.trim() };
-  p.subcategories=p.subcategories||[];
-  p.subcategories.push(sc);
-  save();
-  if(onAdded) onAdded(sc.id);
-  toast(`Added: ${sc.name}`);
+   console.log('MODAL VERSION LOADED');
+  const p = getProject(projectId);
+  if (!p) {
+    toast('Select a project first');
+    return;
+  }
+  
+  // Show modal
+  document.getElementById('subcatProjectName').textContent = p.name;
+  document.getElementById('subcatInput').value = '';
+  openModal('subcatModal');
+  
+  // Focus input after modal opens
+  setTimeout(() => document.getElementById('subcatInput').focus(), 100);
+  
+  // Store callback for confirm button
+  window._quickAddCallback = (name) => {
+    if (!name || !name.trim()) return;
+    
+    const sc = { id: nextId('sc'), name: name.trim() };
+    p.subcategories = p.subcategories || [];
+    p.subcategories.push(sc);
+    save();
+    
+    if (onAdded) onAdded(sc.id);
+    toast(`Added: ${sc.name}`);
+  };
 }
-
 // ------------------------------------------------------------
 // Project modal
 // ------------------------------------------------------------
@@ -1185,6 +1202,31 @@ function bindUI(){
   document.getElementById('btnEntryQuickAddSubcat').addEventListener('click',()=>{
     const pid=document.getElementById('entryProject').value;
     quickAddSubcat(pid,(id)=>{ renderSubcatOptions(document.getElementById('entrySubcat'),pid,id); document.getElementById('entrySubcat').value=id; });
+  });
+
+  // Modal handlers for quick-add subcategory
+  document.getElementById('subcatConfirm').addEventListener('click', () => {
+    const name = document.getElementById('subcatInput').value.trim();
+    if (window._quickAddCallback) {
+      window._quickAddCallback(name);
+      delete window._quickAddCallback;
+    }
+    closeModal('subcatModal');
+  });
+
+  document.getElementById('subcatCancel').addEventListener('click', () => {
+    closeModal('subcatModal');
+    delete window._quickAddCallback;
+  });
+
+  document.getElementById('subcatInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      document.getElementById('subcatConfirm').click();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      document.getElementById('subcatCancel').click();
+    }
   });
 
   document.querySelectorAll('.tab').forEach(t=>{

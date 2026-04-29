@@ -363,6 +363,26 @@
     </div>
   </div>
 
+  <!-- Subcategory Quick Add Modal -->
+  <div id="subcatModal" class="modal-overlay">
+    <div class="modal">
+      <div class="modal-title">Add subcategory to "<span id="subcatProjectName"></span>"</div>
+      <div class="field">
+        <input 
+          type="text" 
+          id="subcatInput" 
+          placeholder="Enter subcategory name..." 
+          autocomplete="off"
+          class="punch-input"
+        >
+      </div>
+      <div class="modal-actions">
+        <button id="subcatCancel" class="btn">Cancel</button>
+        <button id="subcatConfirm" class="btn btn-primary">Add</button>
+      </div>
+    </div>
+  </div>
+
   <div id="toast" class="toast"></div>
   <script src="app.js"></script>
 </body>

@@ -268,6 +268,7 @@ body.widget-mode .full-view { display: none; }
 .modal-overlay.open { display: flex; }
 .modal { background: var(--surface); border: 1px solid var(--border-strong); border-radius: 10px; padding: 22px; width: 480px; max-width: calc(100vw - 32px); max-height: calc(100vh - 32px); overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,0.6); }
 .modal-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.18em; color: var(--text-dim); margin-bottom: 16px; }
+.modal-title span { color: var(--amber); text-transform: none; }
 .field { margin-bottom: 12px; }
 .field .field-label { display: block; min-width: 0; margin-bottom: 6px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-faint); font-weight: 600; }
 .field input, .field textarea, .field select { width: 100%; }
