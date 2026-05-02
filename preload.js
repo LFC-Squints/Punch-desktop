@@ -10,7 +10,10 @@ contextBridge.exposeInMainWorld('punch', {
   isPackaged: () => ipcRenderer.invoke('app:is-packaged'),
 
   resize: (width, height) => ipcRenderer.invoke('window:resize', { width, height }),
+  setMinSize: (minWidth, minHeight) => ipcRenderer.invoke('window:set-min-size', { minWidth, minHeight }),
   setAlwaysOnTop: (on) => ipcRenderer.invoke('window:set-always-on-top', on),
+  updateTrayTooltip: (timerText, projectName) => ipcRenderer.invoke('tray:update-tooltip', { timerText, projectName }),
+  updateTaskbarOverlay: (timerText) => ipcRenderer.invoke('taskbar:update-overlay', { timerText }),
   minimize: () => ipcRenderer.invoke('window:minimize'),
   hide: () => ipcRenderer.invoke('window:hide'),
   quitApp: () => ipcRenderer.invoke('window:close-app'),

@@ -17,15 +17,26 @@
   },
   "dependencies": {
     "active-win": "^7.7.2",
+    "canvas": "^3.2.3",
     "electron-updater": "^6.3.9"
   },
   "build": {
     "appId": "com.justin.punch",
     "productName": "Punch",
-    "directories": { "output": "dist" },
-    "files": [ "main.js", "preload.js", "renderer/**/*", "assets/**/*" ],
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "assets/**/*"
+    ],
     "win": {
-      "target": [ "nsis", "portable" ],
+      "target": [
+        "nsis",
+        "portable"
+      ],
       "icon": "assets/icon.ico"
     },
     "nsis": {

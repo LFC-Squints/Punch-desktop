@@ -58,7 +58,7 @@ if (!gotLock) {
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: WIDGET_SIZE.width, height: WIDGET_SIZE.height,
-    minWidth: 320, minHeight: 320,
+    minWidth: 180, minHeight: 80,
     frame: false, backgroundColor: '#0d1014',
     alwaysOnTop: true, skipTaskbar: false, resizable: true, show: false,
     webPreferences: {
@@ -72,7 +72,7 @@ function createWindow() {
   mainWindow.on('close', (e) => { if (!isQuitting) { e.preventDefault(); mainWindow.hide(); } });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
 
-  if (isDev) mainWindow.webContents.openDevTools({ mode: 'detach' });
+mainWindow.webContents.openDevTools({ mode: 'detach' });
 }
 
 function toggleWindowVisibility() {
@@ -109,6 +109,93 @@ function createTray() {
 function sendToRenderer(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
 }
+
+function updateTrayTooltip(timerText, projectName) {
+  if (!tray) return;
+  if (timerText && projectName) {
+    tray.setToolTip(`Punch — ${timerText}\n${projectName}`);
+  } else if (timerText) {
+    tray.setToolTip(`Punch — ${timerText}`);
+  } else {
+    tray.setToolTip('Punch — Time Tracker');
+  }
+}
+
+function updateTaskbarIcon(timerText) {
+  if (!mainWindow || process.platform !== 'win32') {
+    console.log('[taskbar] Skipped - not Windows or no window');
+    return;
+  }
+  
+  console.log('[taskbar] Updating icon with:', timerText);
+  
+  if (!timerText) {
+    // Restore original icon when timer stops
+    try {
+      const originalIcon = nativeImage.createFromPath(path.join(__dirname, 'assets', 'icon.png'));
+      if (!originalIcon.isEmpty()) {
+        mainWindow.setIcon(originalIcon);
+      }
+    } catch (e) {
+      console.log('[taskbar] Could not restore original icon');
+    }
+    // Also clear overlay
+    mainWindow.setOverlayIcon(null, '');
+    console.log('[taskbar] Icon restored to default');
+    return;
+  }
+  
+  try {
+    // Create a MASSIVE canvas - taskbar will shrink it
+    const canvas = require('canvas');
+    const cvs = canvas.createCanvas(512, 512);
+    const ctx = cvs.getContext('2d');
+    
+    // Solid dark background
+    ctx.fillStyle = '#1a1a1a';
+    ctx.fillRect(0, 0, 512, 512);
+    
+    // Add a subtle border for definition
+    ctx.strokeStyle = '#333333';
+    ctx.lineWidth = 4;
+    ctx.strokeRect(2, 2, 508, 508);
+    
+    // Show MM:SS format - SPLIT VERTICALLY
+    const parts = timerText.split(':');
+    const minutes = parts.length === 3 ? parts[1] : parts[0];
+    const seconds = parts.length === 3 ? parts[2] : parts[1];
+    
+    // Draw the time - MASSIVE font, stacked vertically
+    ctx.fillStyle = '#e89b43'; // Bright green for visibility
+    ctx.textAlign = 'center';
+    
+    // Use monospace for better digit alignment
+    ctx.font = 'bold 200px Consolas, monospace';
+    
+    // Draw minutes on top
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(minutes, 256, 240);
+    
+    // Draw separator
+    ctx.font = 'bold 80px Consolas, monospace';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(':', 256, 256);
+    
+    // Draw seconds on bottom
+    ctx.font = 'bold 200px Consolas, monospace';
+    ctx.textBaseline = 'top';
+    ctx.fillText(seconds, 256, 272);
+    
+    console.log('[taskbar] Icon set successfully');
+    
+    // Convert canvas to icon
+    const img = nativeImage.createFromDataURL(cvs.toDataURL());
+    mainWindow.setIcon(img);
+  } catch (err) {
+    console.error('[taskbar] Error creating icon:', err);
+  }
+}
+
 
 function showAndFocus() {
   if (!mainWindow) return;
@@ -216,9 +303,14 @@ ipcMain.handle('data:save', async (_e, data) => {
   catch (e) { console.error('[punch] save:', e); return false; }
 });
 ipcMain.handle('data:path', () => dataFile);
+ipcMain.handle('tray:update-tooltip', (_e, { timerText, projectName }) => updateTrayTooltip(timerText, projectName));
+ipcMain.handle('taskbar:update-overlay', (_e, { timerText }) => updateTaskbarIcon(timerText));
 ipcMain.handle('window:resize', (_e, { width, height }) => { mainWindow?.setSize(width, height, true); });
 ipcMain.handle('window:set-always-on-top', (_e, on) => { mainWindow?.setAlwaysOnTop(!!on); });
 ipcMain.handle('window:minimize', () => mainWindow?.minimize());
+ipcMain.handle('window:set-min-size', (_e, { minWidth, minHeight }) => {
+  mainWindow?.setMinimumSize(minWidth, minHeight);
+});
 ipcMain.handle('window:hide', () => mainWindow?.hide());
 ipcMain.handle('window:close-app', () => { isQuitting = true; app.quit(); });
 ipcMain.handle('hotkey:set', (_e, accel) => registerHotkey(accel || DEFAULT_HOTKEY));

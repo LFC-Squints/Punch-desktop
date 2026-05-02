@@ -490,6 +490,7 @@ function startTimer(opts={}){
   document.getElementById('accountSel').value=accountId||'';
   document.getElementById('notesInput').value=notes;
   save(); renderAll(); startTick(); toast('Timer started');
+  updateMiniTimer();
 }
 
 function stopTimer(){
@@ -509,6 +510,7 @@ state.entries.push({
   state.activeTimer=null;
   document.getElementById('notesInput').value='';
   save(); renderAll(); stopTick(); toast('Logged '+formatHMS(duration));
+  updateMiniTimer();
 }
 
 function resumeEntry(entryId){
@@ -529,26 +531,13 @@ function startTick(){
   stopTick();
   tickInterval=setInterval(()=>{
     if(!state.activeTimer){ stopTick(); return; }
-    const elapsed = formatHMS(Date.now()-state.activeTimer.startMs);
-    document.getElementById('readout').textContent=elapsed;
+    document.getElementById('readout').textContent=formatHMS(Date.now()-state.activeTimer.startMs)
+    ;
     updateMiniTimer();
     renderTotals();
-    
-    // Update tray tooltip with timer
-    const project = getProject(state.activeTimer.projectId);
-    window.punch.updateTrayTooltip(elapsed, project ? project.name : 'Unknown Project');
-    
-    // Update taskbar overlay icon with timer
-    window.punch.updateTaskbarOverlay(elapsed);
   },1000);
 }
-function stopTick(){ 
-  if(tickInterval) clearInterval(tickInterval); 
-  tickInterval=null;
-  // Reset tray tooltip and taskbar overlay when timer stops
-  window.punch.updateTrayTooltip(null, null);
-  window.punch.updateTaskbarOverlay(null);
-}
+function stopTick(){ if(tickInterval) clearInterval(tickInterval); tickInterval=null; }
 
 function bindActiveTimerInputs(){
   const projSel=document.getElementById('projectSel');
@@ -1299,7 +1288,7 @@ function bindUI(){
   document.getElementById('btnClose').addEventListener('click',()=>window.punch.hide());
   document.getElementById('btnPin').classList.toggle('active',state.settings.alwaysOnTop);
   document.getElementById('btnMiniMode').addEventListener('click', toggleMiniMode);
-  document.getElementById('miniStopBtn').addEventListener('click', stopTimer);
+  document.getElementById('miniStopBtn').addEventListener('click', toggleTimer);
   document.getElementById('btnTimer').addEventListener('click',toggleTimer);
   bindActiveTimerInputs();
   document.getElementById('btnAdApply').addEventListener('click',applyAutodetect);
@@ -1495,6 +1484,7 @@ function updateMiniTimer() {
   
   const timerEl = document.getElementById('miniTimer');
   const projectEl = document.getElementById('miniProject');
+  const btnEl = document.getElementById('miniStopBtn');
   
   if (state.activeTimer) {
     const elapsed = Date.now() - state.activeTimer.startMs;
@@ -1503,9 +1493,23 @@ function updateMiniTimer() {
     // Show project name
     const project = getProject(state.activeTimer.projectId);
     projectEl.textContent = project ? project.name : 'No project';
+    
+    // Button shows STOP when running
+    btnEl.textContent = '■';
+    btnEl.title = 'Stop timer';
+    btnEl.style.background = 'rgba(220, 38, 38, 0.15)';
+    btnEl.style.borderColor = 'rgba(220, 38, 38, 0.4)';
+    btnEl.style.color = 'rgb(220, 38, 38)';
   } else {
     timerEl.textContent = '00:00:00';
     projectEl.textContent = 'No active timer';
+    
+    // Button shows START when stopped
+    btnEl.textContent = '▶';
+    btnEl.title = 'Start timer';
+    btnEl.style.background = 'rgba(34, 197, 94, 0.15)';
+    btnEl.style.borderColor = 'rgba(34, 197, 94, 0.4)';
+    btnEl.style.color = 'rgb(34, 197, 94)';
   }
 }
 

@@ -204,9 +204,18 @@ body.widget-mode .full-view { display: none; }
 .task-notes-block { font-size: 12px; color: var(--text-dim); line-height: 1.5; white-space: pre-wrap; padding: 8px 10px; background: var(--surface-2); border-radius: 6px; border-left: 2px solid var(--border-strong); max-height: 120px; overflow-y: auto; }
 
 /* ACCOUNTS (settings list) */
-.accounts-list { display: flex; flex-direction: column; gap: 4px; }
-.account-row-item { display: flex; align-items: center; gap: 10px; padding: 7px 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; }
-.account-row-item .account-item-name { flex: 1; font-size: 13px; }
+.accounts-list { display: flex; flex-direction: column; gap: 6px; }
+.account-row-item { 
+  display: flex; 
+  align-items: center; 
+  justify-content: space-between;
+  gap: 12px; 
+  padding: 10px 14px; 
+  background: var(--surface); 
+  border: 1px solid var(--border); 
+  border-radius: 8px; 
+}
+.account-row-item .account-item-name { flex: 1; font-size: 13px; color: var(--text); }
 
 /* PROJECTS LIST */
 .projects-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px,1fr)); gap: 12px; }
