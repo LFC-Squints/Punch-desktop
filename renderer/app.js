@@ -1537,7 +1537,8 @@ const WHATS_NEW_CONTENT = {
   <h3>🐛 Hotfixes</h3>
   <ul>
     <li>Fixed taskbar icon timer display</li>
-      <li>Hopefully Ronnies bitchass get's it together</li>
+     <li>Hopefully Ronnies bitchass get's it together</li>
+    <li>call me hellen keller cause Im a fuckin miracle worker</li>
     <li>Fixed mini mode button not updating when stopping timer</li>
     <li>Fixed update installation requiring manual app close</li>
   </ul>
