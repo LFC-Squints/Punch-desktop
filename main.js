@@ -133,65 +133,53 @@ function updateTaskbarIcon(timerText) {
   if (!timerText) {
     // Restore original icon when timer stops
     try {
-      const originalIcon = nativeImage.createFromPath(path.join(__dirname, 'assets', 'icon.png'));
+      const originalIcon = nativeImage.createFromPath(path.join(__dirname, 'assets', 'icon.ico'));
       if (!originalIcon.isEmpty()) {
         mainWindow.setIcon(originalIcon);
+        console.log('[taskbar] Icon restored to default');
       }
     } catch (e) {
-      console.log('[taskbar] Could not restore original icon');
+      console.log('[taskbar] Could not restore original icon:', e);
     }
-    // Also clear overlay
-    mainWindow.setOverlayIcon(null, '');
-    console.log('[taskbar] Icon restored to default');
     return;
   }
   
   try {
-    // Create a MASSIVE canvas - taskbar will shrink it
+    // Create 256x256 canvas for high-quality taskbar icon
     const canvas = require('canvas');
-    const cvs = canvas.createCanvas(512, 512);
+    const cvs = canvas.createCanvas(256, 256);
     const ctx = cvs.getContext('2d');
     
     // Solid dark background
     ctx.fillStyle = '#1a1a1a';
-    ctx.fillRect(0, 0, 512, 512);
+    ctx.fillRect(0, 0, 256, 256);
     
-    // Add a subtle border for definition
-    ctx.strokeStyle = '#333333';
-    ctx.lineWidth = 4;
-    ctx.strokeRect(2, 2, 508, 508);
-    
-    // Show MM:SS format - SPLIT VERTICALLY
+    // Show MM:SS format only (drop the hours)
     const parts = timerText.split(':');
     const minutes = parts.length === 3 ? parts[1] : parts[0];
     const seconds = parts.length === 3 ? parts[2] : parts[1];
     
-    // Draw the time - MASSIVE font, stacked vertically
-    ctx.fillStyle = '#e89b43'; // Bright green for visibility
+    // Draw minutes on top half
+    ctx.fillStyle = '#e89b43';
     ctx.textAlign = 'center';
-    
-    // Use monospace for better digit alignment
-    ctx.font = 'bold 200px Consolas, monospace';
-    
-    // Draw minutes on top
+    ctx.font = 'bold 90px Consolas, monospace';
     ctx.textBaseline = 'bottom';
-    ctx.fillText(minutes, 256, 240);
+    ctx.fillText(minutes, 128, 118);
     
-    // Draw separator
-    ctx.font = 'bold 80px Consolas, monospace';
+    // Draw colon separator
+    ctx.font = 'bold 40px Consolas, monospace';
     ctx.textBaseline = 'middle';
-    ctx.fillText(':', 256, 256);
+    ctx.fillText(':', 128, 128);
     
-    // Draw seconds on bottom
-    ctx.font = 'bold 200px Consolas, monospace';
+    // Draw seconds on bottom half
+    ctx.font = 'bold 90px Consolas, monospace';
     ctx.textBaseline = 'top';
-    ctx.fillText(seconds, 256, 272);
-    
-    console.log('[taskbar] Icon set successfully');
+    ctx.fillText(seconds, 128, 138);
     
     // Convert canvas to icon
     const img = nativeImage.createFromDataURL(cvs.toDataURL());
     mainWindow.setIcon(img);
+    console.log('[taskbar] Icon set successfully');
   } catch (err) {
     console.error('[taskbar] Error creating icon:', err);
   }
@@ -341,7 +329,9 @@ ipcMain.handle('update:download', () => {
 ipcMain.handle('update:install', () => {
   if (!autoUpdater || !app.isPackaged) return false;
   isQuitting = true;
-  setImmediate(() => autoUpdater.quitAndInstall());
+  setImmediate(() => {
+    autoUpdater.quitAndInstall(true, true); // isSilent=true, isForceRunAfter=true
+  });
   return true;
 });
 

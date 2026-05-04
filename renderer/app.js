@@ -490,7 +490,9 @@ function startTimer(opts={}){
   renderAccountOptions(document.getElementById('accountSel'),accountId);
   document.getElementById('accountSel').value=accountId||'';
   document.getElementById('notesInput').value=notes;
-  save(); renderAll(); startTick(); toast('Timer started');
+  save(); renderAll(); startTick(); 
+  updateMiniTimer(); // Update mini mode button state
+  toast('Timer started');
 }
 
 function stopTimer(){
@@ -509,7 +511,9 @@ state.entries.push({
 });
   state.activeTimer=null;
   document.getElementById('notesInput').value='';
-  save(); renderAll(); stopTick(); toast('Logged '+formatHMS(duration));
+  save(); renderAll(); stopTick(); 
+  updateMiniTimer(); // Update mini mode button state
+  toast('Logged '+formatHMS(duration));
 }
 
 function resumeEntry(entryId){
@@ -1300,7 +1304,7 @@ function bindUI(){
   document.getElementById('btnClose').addEventListener('click',()=>window.punch.hide());
   document.getElementById('btnPin').classList.toggle('active',state.settings.alwaysOnTop);
   document.getElementById('btnMiniMode').addEventListener('click', toggleMiniMode);
-  document.getElementById('miniStopBtn').addEventListener('click', stopTimer);
+  document.getElementById('miniStopBtn').addEventListener('click', toggleTimer);
   document.getElementById('btnTimer').addEventListener('click',toggleTimer);
   bindActiveTimerInputs();
   document.getElementById('btnAdApply').addEventListener('click',applyAutodetect);
@@ -1496,6 +1500,7 @@ function updateMiniTimer() {
   
   const timerEl = document.getElementById('miniTimer');
   const projectEl = document.getElementById('miniProject');
+  const btn = document.getElementById('miniStopBtn');
   
   if (state.activeTimer) {
     const elapsed = Date.now() - state.activeTimer.startMs;
@@ -1504,9 +1509,23 @@ function updateMiniTimer() {
     // Show project name
     const project = getProject(state.activeTimer.projectId);
     projectEl.textContent = project ? project.name : 'No project';
+    
+    // Update button to show STOP state
+    btn.textContent = '■';
+    btn.style.background = 'rgba(220, 38, 38, 0.15)';
+    btn.style.borderColor = 'rgba(220, 38, 38, 0.4)';
+    btn.style.color = 'rgb(220, 38, 38)';
+    btn.title = 'Stop timer';
   } else {
     timerEl.textContent = '00:00:00';
     projectEl.textContent = 'No active timer';
+    
+    // Update button to show START state
+    btn.textContent = '▶';
+    btn.style.background = 'rgba(232, 155, 67, 0.15)';
+    btn.style.borderColor = 'rgba(232, 155, 67, 0.4)';
+    btn.style.color = 'rgb(232, 155, 67)';
+    btn.title = 'Start timer';
   }
 }
 
@@ -1514,6 +1533,15 @@ function updateMiniTimer() {
 // What's New Modal
 // ------------------------------------------------------------
 const WHATS_NEW_CONTENT = {
+  '1.3.2': `
+  <h3>🐛 Hotfixes</h3>
+  <ul>
+    <li>Fixed taskbar icon timer display</li>
+      <li>Hopefully Ronnies bitchass get's it together</li>
+    <li>Fixed mini mode button not updating when stopping timer</li>
+    <li>Fixed update installation requiring manual app close</li>
+  </ul>
+`,
   '1.3.1': `
     <h3>🔧 Installer Improvements</h3>
     <ul>
