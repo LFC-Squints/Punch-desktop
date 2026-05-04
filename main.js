@@ -72,9 +72,10 @@ function createWindow() {
   mainWindow.on('close', (e) => { if (!isQuitting) { e.preventDefault(); mainWindow.hide(); } });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
 
-mainWindow.webContents.openDevTools({ mode: 'detach' });
+if (isDev) {
+  mainWindow.webContents.openDevTools({ mode: 'detach' });
 }
-
+}
 function toggleWindowVisibility() {
   if (!mainWindow) return;
   if (mainWindow.isVisible() && mainWindow.isFocused()) mainWindow.hide();

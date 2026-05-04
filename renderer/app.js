@@ -48,6 +48,7 @@ async function init(){
   try {
     const ver = await window.punch.getVersion();
     document.getElementById('appVersion').textContent = ver;
+    checkAndShowWhatsNew(ver);
   } catch(_) {}
 
   const adAvail = await window.punch.autodetectAvailable();
@@ -1508,6 +1509,76 @@ function updateMiniTimer() {
     projectEl.textContent = 'No active timer';
   }
 }
+
+// ------------------------------------------------------------
+// What's New Modal
+// ------------------------------------------------------------
+const WHATS_NEW_CONTENT = {
+  '1.3.1': `
+    <h3>🔧 Installer Improvements</h3>
+    <ul>
+      <li>Updates now install in-place instead of creating duplicate launchers</li>
+      <li>No more admin permission prompts when updating</li>
+      <li>Fixed app failing to launch from packaged installer</li>
+    </ul>
+    
+    <h3>📢 What's New Popup</h3>
+    <ul>
+      <li>You're looking at it! See what's changed with each update</li>
+      <li>Only shows once per version, then dismisses for good</li>
+    </ul>
+  `,
+  '1.3.0': `
+    <h3>💰 Billable Hours Tracking</h3>
+    <ul>
+      <li>Mark accounts as billable by default</li>
+      <li>Toggle billable status on individual entries</li>
+      <li>Green indicators show billable time at a glance</li>
+    </ul>
+    
+    <h3>🪟 Mini Mode Widget</h3>
+    <ul>
+      <li>Ultra-compact 180×80px timer display</li>
+      <li>Draggable, always-on-top</li>
+      <li>Click timer to expand back to full controls</li>
+      <li>Start/Stop button with visual indicators</li>
+    </ul>
+    
+    <h3>⏱️ Live Taskbar Timer</h3>
+    <ul>
+      <li>Your taskbar icon becomes a real-time countdown clock</li>
+      <li>Shows MM:SS in vertical stacked layout</li>
+      <li>Bright amber branding for easy visibility</li>
+      <li>Automatically restores when timer stops</li>
+    </ul>
+  `
+};
+
+function checkAndShowWhatsNew(currentVersion) {
+  const lastSeenVersion = localStorage.getItem('lastSeenVersion');
+  
+  if (lastSeenVersion !== currentVersion && WHATS_NEW_CONTENT[currentVersion]) {
+    showWhatsNewModal(currentVersion);
+  }
+}
+
+function showWhatsNewModal(version) {
+  const modal = document.getElementById('whatsNewModal');
+  const versionEl = document.getElementById('whatsNewVersion');
+  const contentEl = document.getElementById('whatsNewContent');
+  
+  versionEl.textContent = `v${version}`;
+  contentEl.innerHTML = WHATS_NEW_CONTENT[version];
+  
+  modal.style.display = 'flex';
+  
+  // Mark as seen
+  localStorage.setItem('lastSeenVersion', version);
+}
+
+document.getElementById('btnCloseWhatsNew').addEventListener('click', () => {
+  document.getElementById('whatsNewModal').style.display = 'none';
+});
 
 // Boot
 init().catch(err=>{ console.error('init failed',err); alert('Failed to initialize Punch: '+err.message); });

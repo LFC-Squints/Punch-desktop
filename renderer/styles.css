@@ -306,3 +306,35 @@ body.widget-mode .full-view { display: none; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+
+/* What's New Modal Styles */
+#whatsNewModal h3 {
+  color: var(--amber);
+  margin-top: 16px;
+  margin-bottom: 8px;
+  font-size: 16px;
+}
+
+#whatsNewModal h3:first-child {
+  margin-top: 0;
+}
+
+#whatsNewModal ul {
+  margin: 0 0 16px 0;
+  padding-left: 24px;
+  list-style: none;
+}
+
+#whatsNewModal ul li {
+  margin-bottom: 6px;
+  position: relative;
+  color: var(--text);
+}
+
+#whatsNewModal ul li::before {
+  content: "•";
+  color: var(--amber);
+  font-weight: bold;
+  position: absolute;
+  left: -16px;
+}
