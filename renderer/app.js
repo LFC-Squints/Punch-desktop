@@ -1,5 +1,5 @@
 // ============================================================
-// Punch — renderer logic v1.2.1
+// Punch — renderer logic v1.3.3
 // ============================================================
 
 const SWATCH_PALETTE = [
@@ -1533,6 +1533,14 @@ function updateMiniTimer() {
 // What's New Modal
 // ------------------------------------------------------------
 const WHATS_NEW_CONTENT = {
+'1.3.3': `
+  <h3>🐛 Hotfix</h3>
+  <ul>
+    <li>Fixed taskbar timer display (was broken in v1.3.2)</li>
+    <li>Fixed mini mode button state updates</li>
+  </ul>
+`,
+
   '1.3.2': `
   <h3>🐛 Hotfixes</h3>
   <ul>

@@ -1,6 +1,6 @@
 {
   "name": "punch-desktop",
-  "version": "1.3.3",
+  "version": "1.3.1",
   "description": "Self-hosted desktop time tracker with subcategories, tasks, accounts, hotkeys, and AI summary export",
   "main": "main.js",
   "scripts": {
@@ -23,7 +23,6 @@
   "build": {
     "appId": "com.justin.punch",
     "productName": "Punch",
-    "asarUnpack":["node_modules/canvas/**/*"],
     "directories": {
       "output": "dist"
     },
