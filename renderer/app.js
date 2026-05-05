@@ -1533,7 +1533,7 @@ function updateMiniTimer() {
 // What's New Modal
 // ------------------------------------------------------------
 const WHATS_NEW_CONTENT = {
-'1.3.3': `
+'1.3.4': `
   <h3>🐛 Hotfix</h3>
   <ul>
     <li>Fixed taskbar timer display (was broken in v1.3.2)</li>
