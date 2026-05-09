@@ -78,6 +78,7 @@
   <div class="full-view">
     <nav class="tabs">
       <button class="tab active" data-tab="today">Today</button>
+      <button class="tab" data-tab="log">Log</button>
       <button class="tab" data-tab="tasks">Tasks</button>
       <button class="tab" data-tab="projects">Projects</button>
       <button class="tab" data-tab="summary">AI Summary</button>
@@ -97,6 +98,50 @@
         <input type="text" id="entrySearch" class="search-input" placeholder="Search entries…" />
       </div>
       <div id="entriesList" class="entries-list"></div>
+    </div>
+
+    <!-- LOG -->
+    <div class="tab-pane" data-pane="log">
+      <div class="log-controls">
+        <div class="log-filters-row">
+          <select id="logRange" class="punch-select log-range-sel">
+            <option value="today">Today</option>
+            <option value="thisWeek" selected>This week</option>
+            <option value="thisMonth">This month</option>
+            <option value="last30">Last 30 days</option>
+            <option value="custom">Custom…</option>
+          </select>
+          <div id="logCustomRange" class="field-inline hidden">
+            <input id="logRangeStart" type="date" />
+            <span style="color:var(--text-faint)">to</span>
+            <input id="logRangeEnd" type="date" />
+          </div>
+          <input type="text" id="logSearch" class="search-input" placeholder="Search entries…" />
+          <div class="log-billable-filter">
+            <button class="log-filter active" data-log-filter="all">All</button>
+            <button class="log-filter" data-log-filter="billable">$ Billable</button>
+            <button class="log-filter" data-log-filter="nonbillable">Non-billable</button>
+          </div>
+        </div>
+      </div>
+      <div class="log-totals">
+        <div class="log-total-cell">
+          <div class="total-label">Total</div>
+          <div id="logTotal" class="total-value">0:00</div>
+        </div>
+        <div class="log-total-cell log-total-billable">
+          <div class="total-label">Billable</div>
+          <div id="logTotalBillable" class="total-value">0:00</div>
+        </div>
+        <div class="log-total-cell log-total-nonbillable">
+          <div class="total-label">Non-billable</div>
+          <div id="logTotalNonBillable" class="total-value">0:00</div>
+        </div>
+      </div>
+      <div class="entries-toolbar">
+        <button class="btn" id="btnLogExportCSV">Export CSV</button>
+      </div>
+      <div id="logList" class="entries-list"></div>
     </div>
 
     <!-- TASKS -->

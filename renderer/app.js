@@ -32,6 +32,8 @@ let lastDetectedWindow = null, pendingAutodetect = null;
 let idleTimerSnapshot = null;
 let taskFilter = 'active';
 let entrySearchTerm = '';
+let logBillableFilter = 'all';
+let logSearchTerm = '';
 
 // ------------------------------------------------------------
 // Init
@@ -100,6 +102,7 @@ function formatTimeOfDay(ms){
 }
 function startOfDay(ms){ const d=new Date(ms); d.setHours(0,0,0,0); return d.getTime(); }
 function startOfWeek(ms){ const d=new Date(ms); d.setHours(0,0,0,0); d.setDate(d.getDate()-d.getDay()); return d.getTime(); }
+function startOfMonth(ms){ const d=new Date(ms); d.setDate(1); d.setHours(0,0,0,0); return d.getTime(); }
 function dayLabel(ms){
   const diff = Math.round((startOfDay(Date.now()) - startOfDay(ms)) / 86400000);
   if (diff === 0) return 'Today';
@@ -437,7 +440,7 @@ function renderRules(){
 function renderAll(){
   renderTimerWidget(); renderTotals(); renderEntries();
   renderTasks(); renderProjects(); renderRules();
-  renderAccountsList(); updateAccountLabels();
+  renderAccountsList(); updateAccountLabels(); renderLog();
 }
 
 // ------------------------------------------------------------
@@ -930,6 +933,149 @@ function deleteRule(){
 }
 
 // ------------------------------------------------------------
+// LOG tab
+// ------------------------------------------------------------
+function getLogRange(){
+  const el=document.getElementById('logRange');
+  const val=el?el.value:'thisWeek';
+  const now=Date.now();
+  switch(val){
+    case 'today': return {start:startOfDay(now),end:now};
+    case 'thisWeek': return {start:startOfWeek(now),end:now};
+    case 'thisMonth': return {start:startOfMonth(now),end:now};
+    case 'last30': return {start:now-30*86400000,end:now};
+    case 'custom':{
+      const s=document.getElementById('logRangeStart').value;
+      const e=document.getElementById('logRangeEnd').value;
+      if(!s||!e) return {start:startOfDay(now),end:now};
+      return {start:new Date(s).getTime(),end:new Date(e).getTime()+86400000-1};
+    }
+    default: return {start:startOfWeek(now),end:now};
+  }
+}
+
+function getLogEntries(){
+  const range=getLogRange();
+  return state.entries.filter(e=>{
+    if(e.endMs<range.start||e.startMs>range.end) return false;
+    if(logBillableFilter==='billable'&&!e.billable) return false;
+    if(logBillableFilter==='nonbillable'&&e.billable) return false;
+    if(!matchesSearch(e,logSearchTerm)) return false;
+    return true;
+  });
+}
+
+function groupIntoSessions(entries,gapMs=30*60*1000){
+  if(!entries.length) return [];
+  const sorted=[...entries].sort((a,b)=>a.startMs-b.startMs);
+  const sessions=[];
+  let current=[sorted[0]];
+  for(let i=1;i<sorted.length;i++){
+    const prev=current[current.length-1];
+    if(sorted[i].startMs-prev.endMs<=gapMs) current.push(sorted[i]);
+    else{ sessions.push(current); current=[sorted[i]]; }
+  }
+  sessions.push(current);
+  return sessions;
+}
+
+function renderLog(){
+  const list=document.getElementById('logList');
+  if(!list) return;
+  list.innerHTML='';
+  const entries=getLogEntries();
+
+  const totalMs=entries.reduce((s,e)=>s+entryDuration(e),0);
+  const billableMs=entries.filter(e=>e.billable).reduce((s,e)=>s+entryDuration(e),0);
+  document.getElementById('logTotal').textContent=formatHM(totalMs);
+  document.getElementById('logTotalBillable').textContent=formatHM(billableMs);
+  document.getElementById('logTotalNonBillable').textContent=formatHM(totalMs-billableMs);
+
+  if(!entries.length){
+    list.innerHTML=logSearchTerm||logBillableFilter!=='all'
+      ?`<div class="empty">No entries match the current filters.</div>`
+      :`<div class="empty">No entries in this range.</div>`;
+    return;
+  }
+
+  const sorted=[...entries].sort((a,b)=>b.startMs-a.startMs);
+  const days=new Map();
+  for(const e of sorted){
+    const k=startOfDay(e.startMs);
+    if(!days.has(k)) days.set(k,[]);
+    days.get(k).push(e);
+  }
+
+  for(const [dayKey,dayEntries] of [...days.entries()].sort((a,b)=>b[0]-a[0])){
+    const dayMs=dayEntries.reduce((s,e)=>s+entryDuration(e),0);
+    const dayBillableMs=dayEntries.filter(e=>e.billable).reduce((s,e)=>s+entryDuration(e),0);
+    const group=document.createElement('div'); group.className='day-group';
+    group.innerHTML=`<div class="day-header">
+      <span>${dayLabel(dayKey)}</span>
+      <div style="display:flex;gap:14px;align-items:center">
+        ${dayBillableMs>0?`<span style="font-size:10px;font-family:'JetBrains Mono',monospace;color:var(--green)">${formatHM(dayBillableMs)} billable</span>`:''}
+        <span class="day-total">${formatHM(dayMs)}</span>
+      </div></div>`;
+
+    const sessions=groupIntoSessions(dayEntries);
+    for(const session of sessions){
+      const sessionMs=session.reduce((s,e)=>s+entryDuration(e),0);
+      const sessionStart=Math.min(...session.map(e=>e.startMs));
+      const sessionEnd=Math.max(...session.map(e=>e.endMs));
+      const sessionDiv=document.createElement('div'); sessionDiv.className='log-session';
+      sessionDiv.innerHTML=`<div class="log-session-header"><span class="log-session-time">${formatTimeOfDay(sessionStart)} – ${formatTimeOfDay(sessionEnd)}</span><span class="log-session-duration">${formatHM(sessionMs)}</span></div>`;
+
+      for(const e of [...session].sort((a,b)=>a.startMs-b.startMs)){
+        const project=getProject(e.projectId);
+        const subcat=getSubcat(e.projectId,e.subcategoryId);
+        const account=e.accountId?getAccount(e.accountId):null;
+        const task=e.taskId?getTask(e.taskId):null;
+        const color=project?project.color:'#666';
+        const row=document.createElement('div'); row.className='entry';
+        row.innerHTML=`
+          <div class="entry-bar" style="background:${esc(color)}"></div>
+          <div class="entry-meta">
+            <div class="entry-project">
+              ${esc(project?project.name:'(deleted project)')}
+              ${subcat?`<span class="subcat-tag">${esc(subcat.name)}</span>`:''}
+              ${account?`<span class="account-badge">${esc(account.name)}</span>`:''}
+              ${task?`<span class="subcat-tag" style="color:var(--amber)">📋 ${esc(task.name)}</span>`:''}
+              ${e.billable?`<span class="billable-badge">$</span>`:''}
+            </div>
+            <div class="entry-notes">${esc(e.notes||'')}</div>
+          </div>
+          <div class="entry-times">${formatTimeOfDay(e.startMs)} → ${formatTimeOfDay(e.endMs)}</div>
+          <div class="entry-duration">${formatHMS(entryDuration(e))}</div>
+          <div class="entry-actions">
+            <button class="icon-btn green" title="Resume" data-log-resume="${e.id}">▶</button>
+            <button class="icon-btn" title="Edit" data-log-edit="${e.id}">✎</button>
+          </div>`;
+        sessionDiv.appendChild(row);
+      }
+      group.appendChild(sessionDiv);
+    }
+    list.appendChild(group);
+  }
+  list.querySelectorAll('[data-log-edit]').forEach(b=>b.addEventListener('click',()=>openEntryModal(b.dataset.logEdit)));
+  list.querySelectorAll('[data-log-resume]').forEach(b=>b.addEventListener('click',()=>resumeEntry(b.dataset.logResume)));
+}
+
+function exportLogCSV(){
+  const lbl=accountLabel();
+  const rows=[['Date','Project','Subcategory',lbl,'Task','Notes','Start','End','Duration (HH:MM:SS)','Hours (decimal)','Billable']];
+  const entries=getLogEntries().sort((a,b)=>a.startMs-b.startMs);
+  for(const e of entries){
+    const p=getProject(e.projectId); const s=getSubcat(e.projectId,e.subcategoryId);
+    const a=e.accountId?getAccount(e.accountId):null; const t=e.taskId?getTask(e.taskId):null;
+    const dur=entryDuration(e); const ds=new Date(e.startMs),de=new Date(e.endMs);
+    rows.push([ds.toLocaleDateString(),p?p.name:'(deleted)',s?s.name:'',a?a.name:'',t?t.name:'',e.notes||'',ds.toLocaleString(),de.toLocaleString(),formatHMS(dur),(dur/3600000).toFixed(2),e.billable?'Yes':'No']);
+  }
+  const csv=rows.map(r=>r.map(csvEscape).join(',')).join('\r\n');
+  download('punch_log_'+dateStamp()+'.csv',csv,'text/csv');
+  toast('CSV exported');
+}
+
+// ------------------------------------------------------------
 // CSV / JSON
 // ------------------------------------------------------------
 function csvEscape(v){ if(v==null) return ''; const s=String(v); return /[",\n\r]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s; }
@@ -1363,6 +1509,24 @@ document.getElementById('miniTimer').addEventListener('click', exitMiniMode);
 
   document.getElementById('btnManualEntry').addEventListener('click',openManualEntry);
   document.getElementById('btnExportCSV').addEventListener('click',exportCSV);
+
+  // LOG tab
+  document.getElementById('logRange').addEventListener('change',(e)=>{
+    document.getElementById('logCustomRange').classList.toggle('hidden',e.target.value!=='custom');
+    renderLog();
+  });
+  document.getElementById('logRangeStart').addEventListener('change',renderLog);
+  document.getElementById('logRangeEnd').addEventListener('change',renderLog);
+  document.getElementById('logSearch').addEventListener('input',(e)=>{ logSearchTerm=e.target.value.trim(); renderLog(); });
+  document.querySelectorAll('[data-log-filter]').forEach(btn=>{
+    btn.addEventListener('click',()=>{
+      document.querySelectorAll('[data-log-filter]').forEach(x=>x.classList.remove('active'));
+      btn.classList.add('active');
+      logBillableFilter=btn.dataset.logFilter;
+      renderLog();
+    });
+  });
+  document.getElementById('btnLogExportCSV').addEventListener('click',exportLogCSV);
   document.getElementById('btnAddTask').addEventListener('click',()=>openTaskModal());
   document.getElementById('btnSaveTask').addEventListener('click',saveTask);
   document.getElementById('btnDeleteTask').addEventListener('click',deleteTask);
