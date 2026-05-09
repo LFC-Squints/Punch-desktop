@@ -1697,6 +1697,23 @@ function updateMiniTimer() {
 // What's New Modal
 // ------------------------------------------------------------
 const WHATS_NEW_CONTENT = {
+  '1.3.5': `
+    <h3>📋 LOG Tab</h3>
+    <ul>
+      <li>New LOG tab between Today and Tasks for full history browsing</li>
+      <li>Entries grouped into work sessions (gaps > 30 min start a new session)</li>
+      <li>Date range picker: Today, This week, This month, Last 30 days, or Custom</li>
+      <li>Search across project, subcategory, account, task, and notes</li>
+      <li>Filter by All / Billable / Non-billable with live totals</li>
+      <li>Export filtered results to CSV (includes Billable column)</li>
+    </ul>
+
+    <h3>🐛 Bug Fix</h3>
+    <ul>
+      <li>Editing an entry now correctly saves the Billable checkbox state</li>
+    </ul>
+  `,
+
 '1.3.4': `
   <h3>🐛 Hotfix</h3>
   <ul>
