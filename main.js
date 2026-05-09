@@ -25,6 +25,14 @@ try {
 const isDev = process.argv.includes('--dev');
 const userDataPath = app.getPath('userData');
 const dataFile = path.join(userDataPath, 'punch-data.json');
+const logFile  = path.join(userDataPath, 'debug.log');
+
+function writeLog(msg) {
+  try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] ${msg}\n`); } catch (_) {}
+}
+
+process.on('uncaughtException',  (err) => writeLog(`uncaughtException: ${err.stack || err}`));
+process.on('unhandledRejection', (err) => writeLog(`unhandledRejection: ${err?.stack || err}`));
 
 const DEFAULT_HOTKEY = 'CommandOrControl+Alt+P';
 const WIDGET_SIZE = { width: 360, height: 380 };
@@ -69,12 +77,27 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   mainWindow.once('ready-to-show', () => mainWindow.show());
+
+  // Fallback: if renderer fails to signal ready within 8s, show anyway
+  const showFallback = setTimeout(() => {
+    if (mainWindow && !mainWindow.isVisible()) mainWindow.show();
+  }, 8000);
+  mainWindow.once('ready-to-show', () => clearTimeout(showFallback));
+
   mainWindow.on('close', (e) => { if (!isQuitting) { e.preventDefault(); mainWindow.hide(); } });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
 
-if (isDev) {
-  mainWindow.webContents.openDevTools({ mode: 'detach' });
-}
+  // Log renderer crashes to help diagnose packaged-mode issues
+  mainWindow.webContents.on('render-process-gone', (_e, details) => {
+    writeLog(`Renderer process gone: ${details.reason} (exitCode ${details.exitCode})`);
+  });
+  mainWindow.webContents.on('did-fail-load', (_e, code, desc, url) => {
+    writeLog(`Failed to load: ${desc} (${code}) — ${url}`);
+  });
+
+  if (isDev) {
+    mainWindow.webContents.openDevTools({ mode: 'detach' });
+  }
 }
 function toggleWindowVisibility() {
   if (!mainWindow) return;
@@ -329,6 +352,7 @@ ipcMain.handle('webhook:post', async (_e, { url, payload }) => {
   } catch (e) { return { ok: false, error: e.message }; }
 });
 ipcMain.handle('app:open-data-dir', () => shell.openPath(userDataPath));
+ipcMain.handle('app:open-log', () => shell.openPath(logFile));
 ipcMain.handle('app:get-version', () => app.getVersion());
 ipcMain.handle('app:is-packaged', () => app.isPackaged);
 ipcMain.handle('update:check', () => checkForUpdatesManual());

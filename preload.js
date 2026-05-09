@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('punch', {
   saveData: (data) => ipcRenderer.invoke('data:save', data),
   dataPath: () => ipcRenderer.invoke('data:path'),
   openDataDir: () => ipcRenderer.invoke('app:open-data-dir'),
+  openLog: () => ipcRenderer.invoke('app:open-log'),
   getVersion: () => ipcRenderer.invoke('app:get-version'),
   isPackaged: () => ipcRenderer.invoke('app:is-packaged'),
 

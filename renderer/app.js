@@ -1581,6 +1581,7 @@ document.getElementById('btnDeleteAccount').addEventListener('click', deleteAcco
   document.getElementById('btnImportJson').addEventListener('click',()=>document.getElementById('importFile').click());
   document.getElementById('importFile').addEventListener('change',importJsonBackup);
   document.getElementById('btnOpenDataDir').addEventListener('click',()=>window.punch.openDataDir());
+  document.getElementById('btnOpenLog').addEventListener('click',()=>window.punch.openLog());
   document.getElementById('btnWipe').addEventListener('click',wipeAll);
 
   // Modal close
