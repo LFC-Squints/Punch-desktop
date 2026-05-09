@@ -735,7 +735,7 @@ function saveEntry(){
   if(endMs<=startMs){ toast('End must be after start'); return; }
   if(editingEntryId){
     const e=state.entries.find(x=>x.id===editingEntryId);
-    Object.assign(e,{projectId,subcategoryId,accountId,notes,startMs,endMs});
+    Object.assign(e,{projectId,subcategoryId,accountId,notes,billable,startMs,endMs});
   } else {
 state.entries.push({
   id:nextId('e'),
