@@ -1,5 +1,5 @@
 // ============================================================
-// Punch — Electron main process (v1.3.5)
+// Punch — Electron main process (v1.4.0)
 // Tray app, frameless widget, global hotkeys, idle detection,
 // active-window polling, and GitHub-based auto-updates.
 // ============================================================

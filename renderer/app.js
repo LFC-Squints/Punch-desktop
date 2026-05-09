@@ -31,9 +31,13 @@ let tickInterval = null;
 let lastDetectedWindow = null, pendingAutodetect = null;
 let idleTimerSnapshot = null;
 let taskFilter = 'active';
+let taskProjectFilter = 'all';
 let entrySearchTerm = '';
 let logBillableFilter = 'all';
 let logSearchTerm = '';
+let logProjectFilter = 'all';
+let logTaskFilter = 'all';
+let logMissingNotesOnly = false;
 
 // ------------------------------------------------------------
 // Init
@@ -71,12 +75,56 @@ function mergeWithDefaults(loaded){
   const merged = { ...d, ...loaded };
   merged.settings = { ...d.settings, ...(loaded.settings || {}) };
   merged.projects = (loaded.projects || []).map(p => ({ archived:false, subcategories:[], ...p }));
-  merged.entries  = loaded.entries  || [];
-  merged.tasks    = loaded.tasks    || [];
+  merged.entries  = (loaded.entries  || []).map(e => ({
+    taskId: null,
+    billable: false,
+    notes: '',
+    subcategoryId: null,
+    accountId: null,
+    ...e
+  }));
+  merged.tasks    = (loaded.tasks    || []).map(normalizeTaskShape);
   merged.accounts = loaded.accounts || [];
   merged.rules    = loaded.rules    || [];
   merged.nextId   = loaded.nextId   || 1;
   return merged;
+}
+
+// Normalize a task to the current schema, preserving existing fields.
+// Tasks created in earlier versions only had {completed, completedAt}; later versions
+// add status, updatedAt, dueDate, estimatedMinutes, priority. completed stays in sync
+// with status for backward compatibility (anything reading state.tasks[i].completed
+// directly still works).
+//
+// projectIds is the canonical list of every project this task belongs to. projectId
+// is kept as an alias for projectIds[0] so older code paths that read it keep working.
+function normalizeTaskShape(t){
+  const completed = !!t.completed;
+  const status = t.status || (t.archived ? 'archived' : completed ? 'completed' : 'active');
+  // Build projectIds. Prefer existing array; otherwise lift the legacy single projectId.
+  let projectIds = Array.isArray(t.projectIds) ? t.projectIds.slice() : [];
+  if(t.projectId && !projectIds.includes(t.projectId)){
+    projectIds.unshift(t.projectId);
+  }
+  // Drop dupes while preserving order.
+  projectIds = projectIds.filter((id,i) => id && projectIds.indexOf(id) === i);
+  const primary = projectIds[0] || null;
+  return {
+    subcategoryId: null,
+    accountId: null,
+    notes: '',
+    completedAt: null,
+    createdAt: t.createdAt || Date.now(),
+    dueDate: null,
+    estimatedMinutes: null,
+    priority: null,
+    ...t,
+    projectIds,
+    projectId: primary, // keep alias in sync
+    status,
+    completed: status === 'completed',
+    updatedAt: t.updatedAt || t.createdAt || Date.now()
+  };
 }
 
 function save(){ window.punch.saveData(state); }
@@ -131,6 +179,239 @@ function sumTaskMs(taskId){
   for(const e of state.entries){ if(e.taskId===taskId) total+=Math.max(0,e.endMs-e.startMs); }
   if(state.activeTimer&&state.activeTimer.taskId===taskId) total+=Math.max(0,Date.now()-state.activeTimer.startMs);
   return total;
+}
+
+function taskStatus(t){
+  if(!t) return null;
+  return t.status || (t.completed ? 'completed' : 'active');
+}
+function isTaskActive(t){ return taskStatus(t)==='active'; }
+
+// Canonical list of every project a task belongs to. Falls back to the legacy
+// single projectId for any task object that hasn't been normalized yet.
+function taskProjectIds(t){
+  if(!t) return [];
+  if(Array.isArray(t.projectIds) && t.projectIds.length) return t.projectIds;
+  return t.projectId ? [t.projectId] : [];
+}
+function taskBelongsToProject(t, projectId){
+  if(!t || !projectId) return false;
+  return taskProjectIds(t).includes(projectId);
+}
+function taskPrimaryProject(t){
+  return taskProjectIds(t)[0] || null;
+}
+
+function getTasksForProject(projectId, { includeCompleted=false, includeArchived=false } = {}){
+  return state.tasks.filter(t => {
+    if(!taskBelongsToProject(t, projectId)) return false;
+    const s = taskStatus(t);
+    if(s==='archived' && !includeArchived) return false;
+    if(s==='completed' && !includeCompleted) return false;
+    return true;
+  });
+}
+
+function isThisWeek(ms){
+  if(!ms) return false;
+  const start = startOfWeek(Date.now());
+  const end = start + 7*86400000;
+  return ms >= start && ms < end;
+}
+
+function countActiveTasksByProject(projectId){
+  return state.tasks.filter(t => taskBelongsToProject(t, projectId) && isTaskActive(t)).length;
+}
+function countTasksCompletedThisWeekByProject(projectId){
+  return state.tasks.filter(t => taskBelongsToProject(t, projectId) && taskStatus(t)==='completed' && isThisWeek(t.completedAt)).length;
+}
+
+// Sum time logged for a task, restricted to entries whose projectId matches the
+// given project. Used by the Tasks screen so a task that belongs to two projects
+// shows correct per-project totals instead of double-counting its overall time.
+function sumTaskMsForProject(taskId, projectId){
+  let total = 0;
+  for(const e of state.entries){
+    if(e.taskId === taskId && e.projectId === projectId) total += Math.max(0, e.endMs - e.startMs);
+  }
+  if(state.activeTimer && state.activeTimer.taskId === taskId && state.activeTimer.projectId === projectId){
+    total += Math.max(0, Date.now() - state.activeTimer.startMs);
+  }
+  return total;
+}
+
+// Sum time logged today for a task. Clips to today's window so an entry that
+// started yesterday and stopped this morning only counts the post-midnight slice.
+function sumTaskMsToday(taskId){
+  const todayStart = startOfDay(Date.now());
+  let total = 0;
+  for(const e of state.entries){
+    if(e.taskId !== taskId) continue;
+    if(e.endMs <= todayStart) continue;
+    const s = Math.max(e.startMs, todayStart);
+    if(e.endMs > s) total += e.endMs - s;
+  }
+  if(state.activeTimer && state.activeTimer.taskId === taskId){
+    const s = Math.max(state.activeTimer.startMs, todayStart);
+    const now = Date.now();
+    if(now > s) total += now - s;
+  }
+  return total;
+}
+
+// Build the ordered list of items for the Today's Plan section. An item shows
+// up if the task is active AND it's either overdue, due today, or has had time
+// logged today. Sort: overdue → due today → in-progress; within each bucket by
+// due date asc, then created desc.
+function getTodaysPlanItems(){
+  const todayStart = startOfDay(Date.now());
+  const tomorrow = todayStart + 86400000;
+
+  const taskIdsWithTimeToday = new Set();
+  for(const e of state.entries){
+    if(!e.taskId) continue;
+    if(e.endMs > todayStart) taskIdsWithTimeToday.add(e.taskId);
+  }
+  if(state.activeTimer && state.activeTimer.taskId){
+    taskIdsWithTimeToday.add(state.activeTimer.taskId);
+  }
+
+  const items = [];
+  for(const t of state.tasks){
+    if(taskStatus(t) !== 'active') continue;
+    let type = null, sortKey = 999;
+    if(t.dueDate && t.dueDate < todayStart){ type = 'overdue'; sortKey = 0; }
+    else if(t.dueDate && t.dueDate >= todayStart && t.dueDate < tomorrow){ type = 'due-today'; sortKey = 1; }
+    else if(taskIdsWithTimeToday.has(t.id)){ type = 'in-progress'; sortKey = 2; }
+    if(!type) continue;
+    items.push({ task: t, type, sortKey, loggedTodayMs: sumTaskMsToday(t.id) });
+  }
+  items.sort((a,b) => {
+    if(a.sortKey !== b.sortKey) return a.sortKey - b.sortKey;
+    const aDue = a.task.dueDate || Infinity;
+    const bDue = b.task.dueDate || Infinity;
+    if(aDue !== bDue) return aDue - bDue;
+    return (b.task.createdAt||0) - (a.task.createdAt||0);
+  });
+  return items;
+}
+
+function renderTodaysPlan(){
+  const wrap = document.getElementById('todaysPlan');
+  if(!wrap) return;
+  // No tasks at all → don't show the section. Once the user has at least one
+  // task we always render the section (with an "all clear" empty state when
+  // nothing qualifies for today) so the feature stays discoverable.
+  if(state.tasks.length === 0){
+    wrap.innerHTML = '';
+    wrap.classList.add('empty-hidden');
+    return;
+  }
+  wrap.classList.remove('empty-hidden');
+
+  const items = getTodaysPlanItems();
+  let html = `<div class="todays-plan-header">
+    <span class="todays-plan-title">Today's plan</span>
+    <span class="todays-plan-count">${items.length ? items.length + ' item' + (items.length===1?'':'s') : ''}</span>
+  </div>`;
+
+  if(items.length === 0){
+    html += `<div class="todays-plan-empty">
+      All clear for today.
+      <button class="link-btn" data-plan-action="new">+ New task</button>
+      ·
+      <button class="link-btn" data-plan-action="view">View all tasks</button>
+    </div>`;
+  } else {
+    html += '<div class="todays-plan-list">';
+    for(const item of items){
+      const t = item.task;
+      const p = getProject(taskPrimaryProject(t));
+      const isRunning = state.activeTimer && state.activeTimer.taskId === t.id;
+      const typeBadge = {
+        'overdue': '<span class="plan-type-badge type-overdue">Overdue</span>',
+        'due-today': '<span class="plan-type-badge type-due-today">Due today</span>',
+        'in-progress': '<span class="plan-type-badge type-in-progress">In progress</span>'
+      }[item.type] || '';
+      const dueText = t.dueDate ? esc(formatDueDate(t.dueDate)) : '';
+      const estText = t.estimatedMinutes ? `est ${formatHM(t.estimatedMinutes*60000)}` : '';
+      const loggedText = item.loggedTodayMs > 0 ? `${formatHM(item.loggedTodayMs)} today` : '';
+      const prio = t.priority ? `<span class="task-priority-badge prio-${esc(t.priority)}">${esc(t.priority)}</span>` : '';
+      html += `
+        <div class="plan-item${isRunning?' running':''}">
+          <div class="plan-checkbox" data-plan-toggle="${esc(t.id)}" title="Mark complete"></div>
+          <div class="plan-bar" style="background:${esc(p ? p.color : '#666')}"></div>
+          <div class="plan-main">
+            <div class="plan-name">${esc(t.name)}</div>
+            <div class="plan-meta">
+              ${typeBadge}
+              ${p ? `<span class="plan-project">${esc(p.name)}</span>` : ''}
+              ${item.type !== 'in-progress' && dueText ? `<span class="plan-due">${dueText}</span>` : ''}
+              ${prio}
+              ${estText ? `<span class="plan-est">${estText}</span>` : ''}
+              ${loggedText ? `<span class="plan-logged">${loggedText}</span>` : ''}
+              ${isRunning ? '<span class="task-running-badge">● Running</span>' : ''}
+            </div>
+          </div>
+          <div class="plan-actions">
+            <button class="icon-btn" title="Edit" data-plan-edit="${esc(t.id)}">✎</button>
+            <button class="icon-btn amber" title="${isRunning ? 'Stop timer' : 'Start timer for this task'}" data-plan-timer="${esc(t.id)}">${isRunning ? '■' : '▶'}</button>
+          </div>
+        </div>`;
+    }
+    html += '</div>';
+  }
+
+  wrap.innerHTML = html;
+
+  wrap.querySelectorAll('[data-plan-toggle]').forEach(el => {
+    el.addEventListener('click', () => toggleTaskComplete(el.dataset.planToggle));
+  });
+  wrap.querySelectorAll('[data-plan-timer]').forEach(el => {
+    el.addEventListener('click', () => {
+      const id = el.dataset.planTimer;
+      if(state.activeTimer && state.activeTimer.taskId === id) stopTimer();
+      else startTimerForTask(id);
+    });
+  });
+  wrap.querySelectorAll('[data-plan-edit]').forEach(el => {
+    el.addEventListener('click', () => openTaskModal(el.dataset.planEdit));
+  });
+  wrap.querySelectorAll('[data-plan-action]').forEach(el => {
+    el.addEventListener('click', () => {
+      const action = el.dataset.planAction;
+      if(action === 'new'){
+        openTaskModal(null);
+      } else if(action === 'view'){
+        document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+        document.querySelectorAll('.tab-pane').forEach(x=>x.classList.remove('active'));
+        document.querySelector('.tab[data-tab="tasks"]').classList.add('active');
+        document.querySelector('.tab-pane[data-pane="tasks"]').classList.add('active');
+      }
+    });
+  });
+}
+
+function formatDueDate(ms){
+  if(!ms) return '';
+  const d = new Date(ms);
+  const today = startOfDay(Date.now());
+  const dueDay = startOfDay(ms);
+  const diffDays = Math.round((dueDay - today) / 86400000);
+  if(diffDays < 0) return `Overdue · ${d.toLocaleDateString(undefined,{month:'short',day:'numeric'})}`;
+  if(diffDays === 0) return 'Due today';
+  if(diffDays === 1) return 'Due tomorrow';
+  if(diffDays < 7) return `Due ${d.toLocaleDateString(undefined,{weekday:'short'})}`;
+  return `Due ${d.toLocaleDateString(undefined,{month:'short',day:'numeric'})}`;
+}
+
+function dueDateClass(ms){
+  if(!ms) return '';
+  const today = startOfDay(Date.now());
+  const dueDay = startOfDay(ms);
+  if(dueDay < today) return 'due-overdue';
+  if(dueDay === today) return 'due-today';
+  return '';
 }
 
 // ------------------------------------------------------------
@@ -190,6 +471,60 @@ function renderAccountOptions(sel, selectedId){
   });
 }
 
+// Populate the timer's task dropdown. If a projectId is passed we filter to tasks
+// that belong to that project (a task can belong to multiple projects); if no
+// projectId is passed we show every active task across all projects. The currently
+// selected task is preserved even if it doesn't match the filter, so that switching
+// projects mid-edit doesn't silently drop the user's choice.
+function renderTaskOptions(sel, projectId, selectedId){
+  sel.innerHTML='';
+  const blank=document.createElement('option'); blank.value=''; blank.textContent='— no task —'; sel.appendChild(blank);
+  const list = state.tasks.filter(t => isTaskActive(t) && (!projectId || taskBelongsToProject(t, projectId)));
+  if(selectedId && !list.some(t => t.id === selectedId)){
+    const t = getTask(selectedId);
+    if(t) list.unshift(t);
+  }
+  list.sort((a,b)=>{
+    const aDue = a.dueDate || Infinity;
+    const bDue = b.dueDate || Infinity;
+    if(aDue !== bDue) return aDue - bDue;
+    return a.name.localeCompare(b.name);
+  });
+  for(const t of list){
+    const o=document.createElement('option');
+    o.value = t.id;
+    let label = t.name;
+    // Show "ProjectName · TaskName" when we're not filtering to a specific project,
+    // or when the task doesn't belong to the currently-selected project (kept in
+    // the list because it was previously selected).
+    if(!projectId || !taskBelongsToProject(t, projectId)){
+      const p = getProject(taskPrimaryProject(t));
+      if(p) label = `${p.name} · ${t.name}`;
+    }
+    o.textContent = label;
+    if(t.id === selectedId) o.selected = true;
+    sel.appendChild(o);
+  }
+}
+
+// Render the timer's project dropdown with an "— any project —" option at the
+// top. Used only by the timer; modals that require a real project keep using
+// the plain renderProjectOptions.
+function renderTimerProjectOptions(sel, selectedId){
+  sel.innerHTML = '';
+  const any = document.createElement('option');
+  any.value = '';
+  any.textContent = '— any project —';
+  sel.appendChild(any);
+  state.projects.filter(p => !p.archived).forEach(p => {
+    const o = document.createElement('option');
+    o.value = p.id; o.textContent = p.name;
+    if(p.id === selectedId) o.selected = true;
+    sel.appendChild(o);
+  });
+  if(!selectedId) any.selected = true;
+}
+
 function updateAccountLabels(){
   const lbl=accountLabel();
   document.getElementById('accountLabelTitle').textContent=lbl+'s';
@@ -206,12 +541,14 @@ function renderTimerWidget(){
   const widget=document.getElementById('timerWidget');
   const btn=document.getElementById('btnTimer');
   const projSel=document.getElementById('projectSel');
+  const taskSel=document.getElementById('taskSel');
   const subSel=document.getElementById('subcatSel');
   const acctSel=document.getElementById('accountSel');
   const notes=document.getElementById('notesInput');
   const badge=document.getElementById('activeTaskBadge');
 
-  renderProjectOptions(projSel, state.activeTimer?state.activeTimer.projectId:projSel.value);
+  renderTimerProjectOptions(projSel, state.activeTimer?state.activeTimer.projectId:projSel.value);
+  renderTaskOptions(taskSel, projSel.value, state.activeTimer?state.activeTimer.taskId:taskSel.value);
   renderSubcatOptions(subSel, projSel.value, state.activeTimer?state.activeTimer.subcategoryId:null);
   renderAccountOptions(acctSel, state.activeTimer?state.activeTimer.accountId:null);
 
@@ -307,46 +644,131 @@ function renderEntries(){
   list.querySelectorAll('[data-resume-entry]').forEach(b=>b.addEventListener('click',()=>resumeEntry(b.dataset.resumeEntry)));
 }
 
+function renderTaskProjectFilter(){
+  const sel = document.getElementById('taskProjectFilter');
+  if(!sel) return;
+  const current = taskProjectFilter;
+  sel.innerHTML = '';
+  const all = document.createElement('option'); all.value='all'; all.textContent='All projects'; sel.appendChild(all);
+  state.projects.filter(p=>!p.archived).forEach(p=>{
+    const o=document.createElement('option'); o.value=p.id; o.textContent=p.name; sel.appendChild(o);
+  });
+  sel.value = current;
+}
+
 function renderTasks(){
+  renderTaskProjectFilter();
   const list=document.getElementById('tasksList');
   list.innerHTML='';
-  let filtered=state.tasks;
-  if(taskFilter==='active') filtered=state.tasks.filter(t=>!t.completed);
-  else if(taskFilter==='completed') filtered=state.tasks.filter(t=>t.completed);
-  if(filtered.length===0){
-    const msg=taskFilter==='completed'?'No completed tasks yet.':taskFilter==='active'?'No active tasks. Click "+ New task" to add one.':'No tasks yet.';
-    list.innerHTML=`<div class="empty">${msg}</div>`; return;
+  const weekStart = startOfWeek(Date.now());
+  const weekEnd = weekStart + 7*86400000;
+
+  let filtered = state.tasks.slice();
+  // Project filter (use multi-project aware membership check)
+  if(taskProjectFilter !== 'all'){
+    filtered = filtered.filter(t => taskBelongsToProject(t, taskProjectFilter));
   }
-  const byProject=new Map();
-  for(const t of filtered){ if(!byProject.has(t.projectId)) byProject.set(t.projectId,[]); byProject.get(t.projectId).push(t); }
+  // Status / time filter
+  if(taskFilter === 'active') filtered = filtered.filter(t => taskStatus(t) === 'active');
+  else if(taskFilter === 'completed') filtered = filtered.filter(t => taskStatus(t) === 'completed');
+  else if(taskFilter === 'archived') filtered = filtered.filter(t => taskStatus(t) === 'archived');
+  else if(taskFilter === 'thisWeek'){
+    filtered = filtered.filter(t => {
+      const s = taskStatus(t);
+      if(s === 'archived') return false;
+      if(t.dueDate && t.dueDate >= weekStart && t.dueDate < weekEnd) return true;
+      if(s === 'completed' && t.completedAt && t.completedAt >= weekStart && t.completedAt < weekEnd) return true;
+      for(const e of state.entries){
+        if(e.taskId === t.id && e.endMs >= weekStart && e.startMs < weekEnd) return true;
+      }
+      return false;
+    });
+  }
+  if(taskFilter === 'all') filtered = filtered.filter(t => taskStatus(t) !== 'archived');
+
+  if(filtered.length===0){
+    const messages = {
+      active: 'No active tasks. Click "+ New task" to add one.',
+      completed: 'No completed tasks yet.',
+      archived: 'No archived tasks.',
+      thisWeek: 'Nothing scheduled, completed, or logged this week.',
+      all: 'No tasks yet.'
+    };
+    list.innerHTML=`<div class="empty">${messages[taskFilter] || 'No tasks match the current filters.'}</div>`;
+    return;
+  }
+  // Group by project membership — a task in multiple projects appears under each.
+  // Pre-seed groups in state.projects order so the display is stable.
+  const byProject = new Map();
+  for(const p of state.projects) byProject.set(p.id, []);
+  for(const t of filtered){
+    for(const pid of taskProjectIds(t)){
+      if(!byProject.has(pid)) byProject.set(pid, []);
+      byProject.get(pid).push(t);
+    }
+  }
+  for(const [pid, list0] of byProject){ if(list0.length === 0) byProject.delete(pid); }
+
   for(const [pid,tasks] of byProject){
     const p=getProject(pid);
-    const groupTotal=tasks.reduce((s,t)=>s+sumTaskMs(t.id),0);
+    // Group total = sum of time logged TO THIS PROJECT for tasks in this group.
+    // Using sumTaskMsForProject avoids double-counting when a task spans projects.
+    const groupTotal = tasks.reduce((s,t)=>s+sumTaskMsForProject(t.id, pid), 0);
     const header=document.createElement('div'); header.className='task-group-header';
     header.innerHTML=`
       <span class="task-group-swatch" style="background:${esc(p?p.color:'#666')}"></span>
       <span>${esc(p?p.name:'(deleted project)')}</span>
       <span class="task-group-time">${formatHM(groupTotal)} tracked</span>`;
     list.appendChild(header);
-    for(const t of tasks){
+    const sortedTasks = tasks.slice().sort((a,b)=>{
+      const aDue = a.dueDate || Infinity;
+      const bDue = b.dueDate || Infinity;
+      if(aDue !== bDue) return aDue - bDue;
+      return (b.createdAt||0) - (a.createdAt||0);
+    });
+    for(const t of sortedTasks){
       const taskMs=sumTaskMs(t.id);
       const isRunning=state.activeTimer&&state.activeTimer.taskId===t.id;
       const account=t.accountId?getAccount(t.accountId):null;
-      const card=document.createElement('div'); card.className=`task-card${t.completed?' completed':''}`;
+      // Subcategory is project-scoped; only show it inside the task's primary
+      // project group (where the subcategoryId actually maps to a real subcat).
+      const showSubcat = pid === taskPrimaryProject(t);
+      const subcat = showSubcat ? getSubcat(pid, t.subcategoryId) : null;
+      const status = taskStatus(t);
+      const isCompleted = status === 'completed';
+      const isArchived = status === 'archived';
+      const dueBadge = t.dueDate ? `<span class="task-due-badge ${dueDateClass(t.dueDate)}">${esc(formatDueDate(t.dueDate))}</span>` : '';
+      const estBadge = t.estimatedMinutes ? `<span class="task-estimate-badge">est ${formatHM(t.estimatedMinutes*60000)}</span>` : '';
+      const prioBadge = t.priority ? `<span class="task-priority-badge prio-${esc(t.priority)}">${esc(t.priority)}</span>` : '';
+      const subBadge = subcat ? `<span class="subcat-tag">${esc(subcat.name)}</span>` : '';
+      const archivedBadge = isArchived ? '<span class="task-archived-badge">Archived</span>' : '';
+      // Show a hint when this card represents a task that lives in multiple
+      // projects, so the user knows the same task appears elsewhere too.
+      const otherProjectIds = taskProjectIds(t).filter(id => id !== pid);
+      const multiBadge = otherProjectIds.length > 0
+        ? `<span class="task-multi-badge" title="${esc(otherProjectIds.map(id => { const op = getProject(id); return op ? op.name : ''; }).filter(Boolean).join(', '))}">+${otherProjectIds.length} project${otherProjectIds.length===1?'':'s'}</span>`
+        : '';
+      const card=document.createElement('div'); card.className=`task-card${isCompleted?' completed':''}${isArchived?' archived':''}${isRunning?' running':''}`;
       card.innerHTML=`
         <div class="task-card-top">
-          <div class="task-checkbox${t.completed?' checked':''}" data-toggle-task="${t.id}"></div>
+          <div class="task-checkbox${isCompleted?' checked':''}" data-toggle-task="${t.id}"></div>
           <div class="task-main">
             <div class="task-name">${esc(t.name)}</div>
             <div class="task-meta">
               <span class="task-time-badge${taskMs>0?' has-time':''}">${formatHM(taskMs)} logged</span>
+              ${dueBadge}
+              ${estBadge}
+              ${prioBadge}
+              ${subBadge}
               ${account?`<span class="account-badge">${esc(account.name)}</span>`:''}
-              ${isRunning?'<span style="font-size:10px;color:var(--amber)">● Running</span>':''}
+              ${multiBadge}
+              ${archivedBadge}
+              ${isRunning?'<span class="task-running-badge">● Running</span>':''}
               ${t.completedAt?`<span class="task-completed-at">Done ${new Date(t.completedAt).toLocaleDateString()}</span>`:''}
             </div>
           </div>
           <div class="task-actions">
-            ${!t.completed?`<button class="icon-btn amber" title="Start timer for this task" data-task-timer="${t.id}">▶</button>`:''}
+            ${!isCompleted && !isArchived?`<button class="icon-btn amber" title="${isRunning?'Stop timer':'Start timer for this task'}" data-task-timer="${t.id}" data-task-project="${esc(pid)}">${isRunning?'■':'▶'}</button>`:''}
             <button class="icon-btn" title="Edit" data-edit-task="${t.id}">✎</button>
           </div>
         </div>
@@ -355,7 +777,12 @@ function renderTasks(){
     }
   }
   list.querySelectorAll('[data-toggle-task]').forEach(el=>el.addEventListener('click',()=>toggleTaskComplete(el.dataset.toggleTask)));
-  list.querySelectorAll('[data-task-timer]').forEach(el=>el.addEventListener('click',()=>startTimerForTask(el.dataset.taskTimer)));
+  list.querySelectorAll('[data-task-timer]').forEach(el=>el.addEventListener('click',()=>{
+    const id=el.dataset.taskTimer;
+    const pid=el.dataset.taskProject || null;
+    if(state.activeTimer && state.activeTimer.taskId===id) stopTimer();
+    else startTimerForTask(id, pid);
+  }));
   list.querySelectorAll('[data-edit-task]').forEach(el=>el.addEventListener('click',()=>openTaskModal(el.dataset.editTask)));
 }
 
@@ -365,19 +792,50 @@ function renderProjects(){
   const weekStart=startOfWeek(Date.now());
   state.projects.forEach(p=>{
     const total=sumProjectMs(p.id,weekStart,Date.now());
+    const activeTasks = countActiveTasksByProject(p.id);
+    const completedThisWeek = countTasksCompletedThisWeekByProject(p.id);
     const subcats=(p.subcategories||[]);
     const subcatHtml=subcats.length
       ?`<div class="project-subcats">${subcats.map(s=>`<span class="subcat-chip">${esc(s.name)}</span>`).join('')}</div>`
       :`<div class="project-card-empty">No subcategories yet</div>`;
+    const statsHtml = `
+      <div class="project-stats">
+        <span class="project-stat"><span class="project-stat-num">${activeTasks}</span> active task${activeTasks===1?'':'s'}</span>
+        <span class="project-stat"><span class="project-stat-num">${completedThisWeek}</span> done this wk</span>
+        <button class="project-view-tasks" data-view-tasks="${p.id}">View tasks →</button>
+      </div>`;
     const card=document.createElement('div'); card.className='project-card';
     card.innerHTML=`
       <div class="project-card-head">
         <span class="project-swatch" style="background:${esc(p.color)}"></span>
         <span class="project-card-name">${esc(p.name)}</span>
         <span class="project-card-time">${formatHM(total)} this wk</span>
-      </div>${subcatHtml}`;
-    card.addEventListener('click',()=>openProjectModal(p.id));
+      </div>
+      ${statsHtml}
+      ${subcatHtml}`;
+    // Click opens edit modal, EXCEPT clicks on the View-tasks button.
+    card.addEventListener('click',(ev)=>{
+      if(ev.target.closest('[data-view-tasks]')) return;
+      openProjectModal(p.id);
+    });
     list.appendChild(card);
+  });
+  list.querySelectorAll('[data-view-tasks]').forEach(btn=>{
+    btn.addEventListener('click',(ev)=>{
+      ev.stopPropagation();
+      taskProjectFilter = btn.dataset.viewTasks;
+      taskFilter = 'active';
+      // Switch to Tasks tab
+      document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+      document.querySelectorAll('.tab-pane').forEach(x=>x.classList.remove('active'));
+      document.querySelector('.tab[data-tab="tasks"]').classList.add('active');
+      document.querySelector('.tab-pane[data-pane="tasks"]').classList.add('active');
+      // Reset filter buttons to match
+      document.querySelectorAll('.task-filter').forEach(x=>{
+        x.classList.toggle('active', x.dataset.filter === 'active');
+      });
+      renderTasks();
+    });
   });
 }
 
@@ -438,7 +896,7 @@ function renderRules(){
 }
 
 function renderAll(){
-  renderTimerWidget(); renderTotals(); renderEntries();
+  renderTimerWidget(); renderTotals(); renderTodaysPlan(); renderEntries();
   renderTasks(); renderProjects(); renderRules();
   renderAccountsList(); updateAccountLabels(); renderLog();
 }
@@ -485,36 +943,44 @@ function startTimer(opts={}){
   const subcategoryId=opts.subcategoryId!==undefined?opts.subcategoryId:(document.getElementById('subcatSel').value||null);
   const accountId=opts.accountId!==undefined?opts.accountId:(document.getElementById('accountSel').value||null);
   const notes=opts.notes!==undefined?opts.notes:document.getElementById('notesInput').value.trim();
-  const taskId=opts.taskId||null;
+  const taskId=opts.taskId!==undefined?opts.taskId:(document.getElementById('taskSel').value||null);
   state.activeTimer={ projectId, subcategoryId, accountId, notes, taskId, startMs:Date.now() };
   document.getElementById('projectSel').value=projectId;
+  renderTaskOptions(document.getElementById('taskSel'),projectId,taskId);
+  document.getElementById('taskSel').value=taskId||'';
   renderSubcatOptions(document.getElementById('subcatSel'),projectId,subcategoryId);
   document.getElementById('subcatSel').value=subcategoryId||'';
   renderAccountOptions(document.getElementById('accountSel'),accountId);
   document.getElementById('accountSel').value=accountId||'';
   document.getElementById('notesInput').value=notes;
-  save(); renderAll(); startTick(); 
+  save(); renderAll(); startTick();
   updateMiniTimer(); // Update mini mode button state
   toast('Timer started');
 }
 
 function stopTimer(){
   if(!state.activeTimer) return;
+  // Read fields from the current UI state so that manual overrides (e.g. user
+  // changed Project after picking a task) are honoured. projectId stays on the
+  // entry so historical reports remain stable even if the task is later edited.
   const projectId=document.getElementById('projectSel').value||state.activeTimer.projectId;
   const subcategoryId=document.getElementById('subcatSel').value||null;
   const accountId=document.getElementById('accountSel').value||null;
+  const taskId=document.getElementById('taskSel').value||state.activeTimer.taskId||null;
   const notes=document.getElementById('notesInput').value.trim();
   const endMs=Date.now(); const duration=endMs-state.activeTimer.startMs;
   if(duration<1000){ state.activeTimer=null; save(); renderAll(); stopTick(); toast('Too short — discarded'); return; }
-state.entries.push({
-  id:nextId('e'), projectId, subcategoryId, accountId, notes,
-  taskId:state.activeTimer.taskId||null,
-  billable: false,
-  startMs:state.activeTimer.startMs, endMs
-});
+  state.entries.push({
+    id:nextId('e'), projectId, subcategoryId, accountId, notes,
+    taskId,
+    billable: false,
+    startMs:state.activeTimer.startMs, endMs,
+    createdAt: Date.now()
+  });
   state.activeTimer=null;
   document.getElementById('notesInput').value='';
-  save(); renderAll(); stopTick(); 
+  document.getElementById('taskSel').value='';
+  save(); renderAll(); stopTick();
   updateMiniTimer(); // Update mini mode button state
   toast('Logged '+formatHMS(duration));
 }
@@ -526,10 +992,18 @@ function resumeEntry(entryId){
   toast('Resumed — timer running');
 }
 
-function startTimerForTask(taskId){
+function startTimerForTask(taskId, projectIdOverride){
   const t=getTask(taskId); if(!t) return;
   if(state.activeTimer) stopTimer();
-  startTimer({ projectId:t.projectId, subcategoryId:t.subcategoryId||null, accountId:t.accountId||null, notes:t.name, taskId:t.id });
+  // If the caller passed a specific project (e.g. user clicked ▶ from a particular
+  // project group on the Tasks screen), honor it — but only if the task actually
+  // belongs to that project. Otherwise fall back to the task's primary project.
+  const projectId = (projectIdOverride && taskBelongsToProject(t, projectIdOverride))
+    ? projectIdOverride
+    : taskPrimaryProject(t);
+  // Subcategory is project-scoped and only meaningful under the task's primary.
+  const subcategoryId = projectId === taskPrimaryProject(t) ? (t.subcategoryId || null) : null;
+  startTimer({ projectId, subcategoryId, accountId:t.accountId||null, notes:t.name, taskId:t.id });
   setMode('widget');
 }
 
@@ -560,16 +1034,92 @@ function stopTick(){
 
 function bindActiveTimerInputs(){
   const projSel=document.getElementById('projectSel');
+  const taskSel=document.getElementById('taskSel');
   const subSel=document.getElementById('subcatSel');
   const acctSel=document.getElementById('accountSel');
   const notes=document.getElementById('notesInput');
   projSel.addEventListener('change',()=>{
-    renderSubcatOptions(subSel,projSel.value,null);
-    if(state.activeTimer){ state.activeTimer.projectId=projSel.value; state.activeTimer.subcategoryId=null; save(); }
+    // Project changed manually. Keep the task selection — the spec says task should
+    // survive a project override, and renderTaskOptions surfaces cross-project tasks
+    // with a "ProjectName · TaskName" label so it's still visible.
+    //
+    // Note about "— any project —" (empty value): selecting it is a UI-only filter
+    // that expands the task dropdown to all active tasks. We deliberately do NOT
+    // clear activeTimer.projectId in that case, so a running timer keeps logging
+    // against its real project. Picking a real project from the dropdown DOES
+    // update the running timer.
+    const keptTaskId = taskSel.value || null;
+    renderTaskOptions(taskSel, projSel.value, keptTaskId);
+    renderSubcatOptions(subSel, projSel.value, null);
+    if(state.activeTimer && projSel.value){
+      state.activeTimer.projectId=projSel.value;
+      state.activeTimer.subcategoryId=null;
+      // Don't clear taskId — entry preserves the manual project anyway.
+      save();
+    }
+  });
+  taskSel.addEventListener('change',()=>{
+    const taskId = taskSel.value || null;
+    if(taskId){
+      applyTaskToTimerInputs(taskId);
+    } else if(state.activeTimer){
+      state.activeTimer.taskId = null;
+      save();
+      renderTimerWidget();
+    } else {
+      renderTimerWidget();
+    }
   });
   subSel.addEventListener('change',()=>{ if(state.activeTimer){ state.activeTimer.subcategoryId=subSel.value||null; save(); } });
   acctSel.addEventListener('change',()=>{ if(state.activeTimer){ state.activeTimer.accountId=acctSel.value||null; save(); } });
   notes.addEventListener('blur',()=>{ if(state.activeTimer){ state.activeTimer.notes=notes.value.trim(); save(); } });
+}
+
+// Apply a task's defaults to the timer's input fields and update activeTimer if running.
+// Project/subcat/account are auto-filled from the task; the user can still override
+// them afterwards. Notes are only seeded when currently empty so we don't clobber
+// what the user is typing.
+//
+// Project resolution when the task belongs to multiple projects:
+//   - If the user has already narrowed to a project the task is in, keep it.
+//     (e.g. you're in "Marketing" and pick a task that's in both Marketing and
+//     Product Launch — Marketing stays selected.)
+//   - Otherwise default to the task's primary project (projectIds[0]).
+//   Subcategory only auto-fills when the resolved project is the task's primary,
+//   since subcategories are project-scoped and the task's stored subcategoryId
+//   only makes sense under its primary project.
+function applyTaskToTimerInputs(taskId){
+  const t = getTask(taskId);
+  if(!t) return;
+  const projSel=document.getElementById('projectSel');
+  const taskSel=document.getElementById('taskSel');
+  const subSel=document.getElementById('subcatSel');
+  const acctSel=document.getElementById('accountSel');
+  const notesEl=document.getElementById('notesInput');
+
+  const currentProjectId = projSel.value || null;
+  const resolvedProjectId = (currentProjectId && taskBelongsToProject(t, currentProjectId))
+    ? currentProjectId
+    : taskPrimaryProject(t);
+  const useTaskSubcat = resolvedProjectId === taskPrimaryProject(t);
+  const subcatId = useTaskSubcat ? (t.subcategoryId || null) : null;
+
+  projSel.value = resolvedProjectId || '';
+  renderTaskOptions(taskSel, resolvedProjectId, t.id);
+  renderSubcatOptions(subSel, resolvedProjectId, subcatId);
+  subSel.value = subcatId || '';
+  renderAccountOptions(acctSel, t.accountId || null);
+  acctSel.value = t.accountId || '';
+  if(!notesEl.value.trim() && t.notes){ notesEl.value = t.notes; }
+
+  if(state.activeTimer){
+    state.activeTimer.projectId = resolvedProjectId;
+    state.activeTimer.taskId = t.id;
+    state.activeTimer.subcategoryId = subcatId;
+    state.activeTimer.accountId = t.accountId || null;
+    if(!state.activeTimer.notes && t.notes) state.activeTimer.notes = t.notes;
+    save();
+  }
 }
 
 // ------------------------------------------------------------
@@ -761,31 +1311,92 @@ function deleteEntry(){
 // ------------------------------------------------------------
 // Task modal
 // ------------------------------------------------------------
-function openTaskModal(taskId){
+// When set, openTaskModal pre-fills from these and saveTask passes the new task id back.
+// Used by the timer's quick-add (+) button.
+let taskModalDefaults = null;
+let taskModalOnSave = null;
+
+// Renders the "Also in" project chips in the task modal. The primary project is
+// excluded from the chip list — to make a previously-extra project the primary,
+// the user changes the Project dropdown.
+function renderTaskAlsoInProjects(primaryId, selectedExtras){
+  const wrap = document.getElementById('taskAlsoInProjects');
+  if(!wrap) return;
+  wrap.innerHTML = '';
+  const others = state.projects.filter(p => !p.archived && p.id !== primaryId);
+  if(others.length === 0){
+    wrap.innerHTML = '<div class="hint-text" style="margin:0">No other projects to add.</div>';
+    return;
+  }
+  for(const p of others){
+    const checked = selectedExtras.includes(p.id);
+    const lbl = document.createElement('label');
+    lbl.className = 'task-also-in-chip' + (checked ? ' selected' : '');
+    lbl.innerHTML = `<input type="checkbox" data-extra-pid="${esc(p.id)}" ${checked?'checked':''} /><span class="task-chip-swatch" style="background:${esc(p.color)}"></span><span class="task-chip-name">${esc(p.name)}</span>`;
+    wrap.appendChild(lbl);
+  }
+  wrap.querySelectorAll('input[data-extra-pid]').forEach(cb=>{
+    cb.addEventListener('change',()=>{
+      cb.closest('.task-also-in-chip').classList.toggle('selected', cb.checked);
+    });
+  });
+}
+
+function getTaskAlsoInSelections(){
+  return [...document.querySelectorAll('#taskAlsoInProjects input[data-extra-pid]:checked')].map(cb => cb.dataset.extraPid);
+}
+
+function openTaskModal(taskId, opts={}){
   editingTaskId=taskId||null;
+  taskModalDefaults = opts.defaults || null;
+  taskModalOnSave = opts.onSave || null;
   if(state.projects.length===0){ toast('Add a project first'); return; }
   const projSel=document.getElementById('taskProject');
   const subSel=document.getElementById('taskSubcat');
   const acctSel=document.getElementById('taskAccount');
+  const dueEl=document.getElementById('taskDueDate');
+  const estEl=document.getElementById('taskEstimate');
+  const prioEl=document.getElementById('taskPriority');
+  const statEl=document.getElementById('taskStatusSel');
   if(taskId){
     const t=getTask(taskId);
+    const ids = taskProjectIds(t);
+    const primary = ids[0];
+    const extras = ids.slice(1);
     document.getElementById('taskModalTitle').textContent='Edit task';
     document.getElementById('taskName').value=t.name;
     document.getElementById('taskNotes').value=t.notes||'';
-    renderProjectOptions(projSel,t.projectId);
-    renderSubcatOptions(subSel,t.projectId,t.subcategoryId);
+    renderProjectOptions(projSel, primary);
+    renderSubcatOptions(subSel, primary, t.subcategoryId);
     renderAccountOptions(acctSel,t.accountId||null);
+    renderTaskAlsoInProjects(primary, extras);
+    dueEl.value = t.dueDate ? toDateInput(t.dueDate) : '';
+    estEl.value = t.estimatedMinutes != null ? t.estimatedMinutes : '';
+    prioEl.value = t.priority || '';
+    statEl.value = taskStatus(t) || 'active';
     document.getElementById('btnDeleteTask').style.display='';
   } else {
+    const def = taskModalDefaults || {};
     document.getElementById('taskModalTitle').textContent='New task';
-    document.getElementById('taskName').value='';
-    document.getElementById('taskNotes').value='';
-    renderProjectOptions(projSel,state.projects[0].id);
-    renderSubcatOptions(subSel,state.projects[0].id,null);
-    renderAccountOptions(acctSel,null);
+    document.getElementById('taskName').value = def.name || '';
+    document.getElementById('taskNotes').value = def.notes || '';
+    const initialProject = def.projectId || state.projects[0].id;
+    renderProjectOptions(projSel, initialProject);
+    renderSubcatOptions(subSel, initialProject, def.subcategoryId || null);
+    renderAccountOptions(acctSel, def.accountId || null);
+    renderTaskAlsoInProjects(initialProject, []);
+    dueEl.value = '';
+    estEl.value = '';
+    prioEl.value = '';
+    statEl.value = 'active';
     document.getElementById('btnDeleteTask').style.display='none';
   }
-  projSel.onchange=()=>renderSubcatOptions(subSel,projSel.value,null);
+  projSel.onchange=()=>{
+    renderSubcatOptions(subSel,projSel.value,null);
+    // Preserve any extras the user has already ticked, except the new primary itself.
+    const currentExtras = getTaskAlsoInSelections().filter(id => id !== projSel.value);
+    renderTaskAlsoInProjects(projSel.value, currentExtras);
+  };
   updateAccountLabels();
   openModal('taskModal');
   setTimeout(()=>document.getElementById('taskName').focus(),50);
@@ -793,13 +1404,49 @@ function openTaskModal(taskId){
 function saveTask(){
   const name=document.getElementById('taskName').value.trim();
   if(!name){ toast('Task name required'); return; }
-  const projectId=document.getElementById('taskProject').value;
+  const primaryProjectId = document.getElementById('taskProject').value;
+  if(!primaryProjectId){ toast('Pick a project'); return; }
+  const extras = getTaskAlsoInSelections().filter(id => id && id !== primaryProjectId);
+  const projectIds = [primaryProjectId, ...extras];
   const subcategoryId=document.getElementById('taskSubcat').value||null;
   const accountId=document.getElementById('taskAccount').value||null;
   const notes=document.getElementById('taskNotes').value.trim();
-  if(editingTaskId){ const t=getTask(editingTaskId); Object.assign(t,{name,projectId,subcategoryId,accountId,notes}); }
-  else { state.tasks.push({id:nextId('t'),name,projectId,subcategoryId,accountId,notes,completed:false,completedAt:null,createdAt:Date.now()}); }
-  save(); closeModal('taskModal'); renderTasks();
+  const dueRaw = document.getElementById('taskDueDate').value;
+  const dueDate = dueRaw ? new Date(dueRaw + 'T00:00:00').getTime() : null;
+  const estRaw = document.getElementById('taskEstimate').value;
+  const estimatedMinutes = estRaw === '' ? null : Math.max(0, parseInt(estRaw,10) || 0);
+  const priority = document.getElementById('taskPriority').value || null;
+  const status = document.getElementById('taskStatusSel').value || 'active';
+  const completed = status === 'completed';
+  const now = Date.now();
+  let savedId;
+  if(editingTaskId){
+    const t=getTask(editingTaskId);
+    const wasCompleted = !!t.completed;
+    Object.assign(t,{
+      name, projectIds, projectId: primaryProjectId, subcategoryId, accountId, notes,
+      dueDate, estimatedMinutes, priority, status, completed,
+      updatedAt: now
+    });
+    if(completed && !wasCompleted) t.completedAt = now;
+    if(!completed) t.completedAt = null;
+    savedId = t.id;
+  } else {
+    savedId = nextId('t');
+    state.tasks.push({
+      id: savedId, name, projectIds, projectId: primaryProjectId, subcategoryId, accountId, notes,
+      dueDate, estimatedMinutes, priority, status, completed,
+      completedAt: completed ? now : null,
+      createdAt: now, updatedAt: now
+    });
+  }
+  save();
+  closeModal('taskModal');
+  const cb = taskModalOnSave;
+  taskModalOnSave = null;
+  taskModalDefaults = null;
+  renderAll();
+  if(cb) cb(savedId);
 }
 function deleteTask(){
   if(!editingTaskId) return;
@@ -809,8 +1456,12 @@ function deleteTask(){
 }
 function toggleTaskComplete(taskId){
   const t=getTask(taskId); if(!t) return;
-  t.completed=!t.completed; t.completedAt=t.completed?Date.now():null;
-  save(); renderTasks(); toast(t.completed?'Task marked complete':'Task reopened');
+  const now = Date.now();
+  t.completed = !t.completed;
+  t.completedAt = t.completed ? now : null;
+  t.status = t.completed ? 'completed' : 'active';
+  t.updatedAt = now;
+  save(); renderAll(); toast(t.completed?'Task marked complete':'Task reopened');
 }
 
 // ------------------------------------------------------------
@@ -960,9 +1611,46 @@ function getLogEntries(){
     if(e.endMs<range.start||e.startMs>range.end) return false;
     if(logBillableFilter==='billable'&&!e.billable) return false;
     if(logBillableFilter==='nonbillable'&&e.billable) return false;
+    if(logProjectFilter !== 'all' && e.projectId !== logProjectFilter) return false;
+    if(logTaskFilter !== 'all'){
+      if(logTaskFilter === '__none__'){ if(e.taskId) return false; }
+      else if(e.taskId !== logTaskFilter) return false;
+    }
+    if(logMissingNotesOnly && (e.notes||'').trim()) return false;
     if(!matchesSearch(e,logSearchTerm)) return false;
     return true;
   });
+}
+
+function renderLogFilterDropdowns(){
+  const projSel = document.getElementById('logProjectFilter');
+  const taskSel = document.getElementById('logTaskFilter');
+  if(!projSel || !taskSel) return;
+  // Project filter options
+  projSel.innerHTML = '';
+  const allP = document.createElement('option'); allP.value='all'; allP.textContent='All projects'; projSel.appendChild(allP);
+  state.projects.forEach(p=>{
+    const o=document.createElement('option'); o.value=p.id; o.textContent=p.name; projSel.appendChild(o);
+  });
+  projSel.value = logProjectFilter;
+  // Task filter options — narrow to selected project if any.
+  taskSel.innerHTML = '';
+  const allT = document.createElement('option'); allT.value='all'; allT.textContent='All tasks'; taskSel.appendChild(allT);
+  const noneT = document.createElement('option'); noneT.value='__none__'; noneT.textContent='— no task —'; taskSel.appendChild(noneT);
+  const taskList = state.tasks.filter(t => logProjectFilter==='all' || t.projectId === logProjectFilter);
+  taskList.forEach(t=>{
+    const o=document.createElement('option'); o.value=t.id;
+    const p = getProject(t.projectId);
+    o.textContent = logProjectFilter==='all' && p ? `${p.name} · ${t.name}` : t.name;
+    taskSel.appendChild(o);
+  });
+  // Reset task filter if its task no longer exists in the narrowed list
+  const taskValueExists = logTaskFilter==='all' || logTaskFilter==='__none__' || taskList.some(t=>t.id===logTaskFilter);
+  if(!taskValueExists) logTaskFilter = 'all';
+  taskSel.value = logTaskFilter;
+  // Missing notes button toggle state
+  const mn = document.getElementById('logMissingNotesBtn');
+  if(mn) mn.classList.toggle('active', logMissingNotesOnly);
 }
 
 function groupIntoSessions(entries,gapMs=30*60*1000){
@@ -982,6 +1670,7 @@ function groupIntoSessions(entries,gapMs=30*60*1000){
 function renderLog(){
   const list=document.getElementById('logList');
   if(!list) return;
+  renderLogFilterDropdowns();
   list.innerHTML='';
   const entries=getLogEntries();
 
@@ -1060,16 +1749,51 @@ function renderLog(){
   list.querySelectorAll('[data-log-resume]').forEach(b=>b.addEventListener('click',()=>resumeEntry(b.dataset.logResume)));
 }
 
+// Build a CSV row for an entry. The schema is the same for both Today and Log
+// exports, so downstream tools (Excel, dashboards, AI prompts) can rely on
+// stable column names. IDs go alongside human-readable names — IDs are stable
+// across renames; names are easy to scan.
+function buildEntryRow(e){
+  const p = getProject(e.projectId);
+  const s = getSubcat(e.projectId, e.subcategoryId);
+  const a = e.accountId ? getAccount(e.accountId) : null;
+  const t = e.taskId ? getTask(e.taskId) : null;
+  const dur = entryDuration(e);
+  const ds = new Date(e.startMs);
+  const de = new Date(e.endMs);
+  return [
+    e.id,
+    ds.toISOString(),
+    de.toISOString(),
+    ds.toLocaleDateString(),
+    formatHMS(dur),
+    (dur/3600000).toFixed(2),
+    e.projectId || '',
+    p ? p.name : '(deleted)',
+    e.subcategoryId || '',
+    s ? s.name : '',
+    e.taskId || '',
+    t ? t.name : '',
+    e.accountId || '',
+    a ? a.name : '',
+    e.notes || '',
+    e.billable ? 'Yes' : 'No',
+    e.createdAt ? new Date(e.createdAt).toISOString() : ''
+  ];
+}
+
+const ENTRY_CSV_HEADER = [
+  'Entry ID','Start (ISO)','End (ISO)','Date','Duration (HH:MM:SS)','Hours (decimal)',
+  'Project ID','Project','Subcategory ID','Subcategory',
+  'Task ID','Task',
+  'Account ID','Account',
+  'Notes','Billable','Created (ISO)'
+];
+
 function exportLogCSV(){
-  const lbl=accountLabel();
-  const rows=[['Date','Project','Subcategory',lbl,'Task','Notes','Start','End','Duration (HH:MM:SS)','Hours (decimal)','Billable']];
+  const rows=[ENTRY_CSV_HEADER];
   const entries=getLogEntries().sort((a,b)=>a.startMs-b.startMs);
-  for(const e of entries){
-    const p=getProject(e.projectId); const s=getSubcat(e.projectId,e.subcategoryId);
-    const a=e.accountId?getAccount(e.accountId):null; const t=e.taskId?getTask(e.taskId):null;
-    const dur=entryDuration(e); const ds=new Date(e.startMs),de=new Date(e.endMs);
-    rows.push([ds.toLocaleDateString(),p?p.name:'(deleted)',s?s.name:'',a?a.name:'',t?t.name:'',e.notes||'',ds.toLocaleString(),de.toLocaleString(),formatHMS(dur),(dur/3600000).toFixed(2),e.billable?'Yes':'No']);
-  }
+  for(const e of entries) rows.push(buildEntryRow(e));
   const csv=rows.map(r=>r.map(csvEscape).join(',')).join('\r\n');
   download('punch_log_'+dateStamp()+'.csv',csv,'text/csv');
   toast('CSV exported');
@@ -1080,15 +1804,9 @@ function exportLogCSV(){
 // ------------------------------------------------------------
 function csvEscape(v){ if(v==null) return ''; const s=String(v); return /[",\n\r]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s; }
 function exportCSV(){
-  const lbl=accountLabel();
-  const rows=[['Date','Project','Subcategory',lbl,'Task','Notes','Start','End','Duration (HH:MM:SS)','Hours (decimal)']];
+  const rows=[ENTRY_CSV_HEADER];
   const sorted=[...state.entries].sort((a,b)=>a.startMs-b.startMs);
-  for(const e of sorted){
-    const p=getProject(e.projectId); const s=getSubcat(e.projectId,e.subcategoryId);
-    const a=e.accountId?getAccount(e.accountId):null; const t=e.taskId?getTask(e.taskId):null;
-    const dur=entryDuration(e); const ds=new Date(e.startMs), de=new Date(e.endMs);
-    rows.push([ds.toLocaleDateString(),p?p.name:'(deleted)',s?s.name:'',a?a.name:'',t?t.name:'',e.notes||'',ds.toLocaleString(),de.toLocaleString(),formatHMS(dur),(dur/3600000).toFixed(2)]);
-  }
+  for(const e of sorted) rows.push(buildEntryRow(e));
   const csv=rows.map(r=>r.map(csvEscape).join(',')).join('\r\n');
   download('punch_entries_'+dateStamp()+'.csv',csv,'text/csv');
   toast('CSV exported');
@@ -1185,17 +1903,82 @@ function buildSummaryData(range){
 
   const completedTasks=state.tasks.filter(t=>t.completed&&t.completedAt>=range.start&&t.completedAt<=range.end).map(t=>{
     const p=getProject(t.projectId); const a=t.accountId?getAccount(t.accountId):null;
-    return {name:t.name,project:p?p.name:'(deleted)',account:a?a.name:null,hoursLogged:+(sumTaskMs(t.id)/3600000).toFixed(2)};
+    return {id:t.id,name:t.name,project:p?p.name:'(deleted)',projectId:t.projectId,account:a?a.name:null,hoursLogged:+(sumTaskMs(t.id)/3600000).toFixed(2)};
   });
+
+  // Tasks with time logged in this period that are not yet completed — likely
+  // carry-forward work for next period. Compute hours-logged-in-range-only so
+  // we don't conflate prior effort with the current window.
+  const taskHoursInRange = new Map();
+  for(const e of inRange){
+    if(!e.taskId) continue;
+    const dur = Math.min(e.endMs,range.end) - Math.max(e.startMs,range.start);
+    if(dur <= 0) continue;
+    taskHoursInRange.set(e.taskId, (taskHoursInRange.get(e.taskId)||0) + dur);
+  }
+  const incompleteWithTime = [];
+  for(const [tid, ms] of taskHoursInRange){
+    const t = getTask(tid);
+    if(!t || t.completed) continue;
+    const p = getProject(t.projectId);
+    incompleteWithTime.push({
+      id: t.id, name: t.name,
+      project: p ? p.name : '(deleted)', projectId: t.projectId,
+      hoursLoggedThisPeriod: +(ms/3600000).toFixed(2),
+      hoursLoggedTotal: +(sumTaskMs(t.id)/3600000).toFixed(2),
+      estimatedMinutes: t.estimatedMinutes || null,
+      dueDate: t.dueDate ? new Date(t.dueDate).toISOString() : null,
+      priority: t.priority || null
+    });
+  }
+  incompleteWithTime.sort((a,b)=>b.hoursLoggedThisPeriod - a.hoursLoggedThisPeriod);
+
+  // Carry-forward candidates: active tasks that are overdue or due in the next
+  // 7 days, ordered by due date. Use range.end as "now" so weekly summaries
+  // stay coherent for past periods.
+  const horizon = range.end + 7*86400000;
+  const carryForward = state.tasks.filter(t => isTaskActive(t) && t.dueDate && t.dueDate <= horizon).map(t => {
+    const p = getProject(t.projectId);
+    return {
+      id: t.id, name: t.name,
+      project: p ? p.name : '(deleted)', projectId: t.projectId,
+      dueDate: new Date(t.dueDate).toISOString(),
+      overdue: t.dueDate < range.end,
+      hoursLoggedTotal: +(sumTaskMs(t.id)/3600000).toFixed(2),
+      estimatedMinutes: t.estimatedMinutes || null,
+      priority: t.priority || null
+    };
+  }).sort((a,b)=>new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime());
+
+  // Quality signal: entries with no notes, useful for prompting users to fill in context.
+  const entriesMissingNotes = inRange.filter(e => !(e.notes||'').trim()).length;
 
   return {
     period:{label:range.label,start:new Date(range.start).toISOString(),end:new Date(range.end).toISOString()},
-    totals:{hours:+(totalMs/3600000).toFixed(2),formatted:formatHM(totalMs),entryCount:inRange.length},
+    totals:{
+      hours:+(totalMs/3600000).toFixed(2),
+      formatted:formatHM(totalMs),
+      entryCount:inRange.length,
+      entriesMissingNotes
+    },
     accountLabel:lbl, projects, accounts, completedTasks,
+    incompleteWithTime, carryForward,
     entries:inRange.map(e=>{
       const p=getProject(e.projectId), s=getSubcat(e.projectId,e.subcategoryId);
       const a=e.accountId?getAccount(e.accountId):null, t=e.taskId?getTask(e.taskId):null;
-      return {date:new Date(e.startMs).toLocaleDateString(),project:p?p.name:'(deleted)',subcategory:s?s.name:null,account:a?a.name:null,task:t?t.name:null,notes:e.notes||null,start:new Date(e.startMs).toISOString(),end:new Date(e.endMs).toISOString(),hours:+(entryDuration(e)/3600000).toFixed(2)};
+      return {
+        id:e.id,
+        date:new Date(e.startMs).toLocaleDateString(),
+        projectId:e.projectId, project:p?p.name:'(deleted)',
+        subcategoryId:e.subcategoryId||null, subcategory:s?s.name:null,
+        accountId:e.accountId||null, account:a?a.name:null,
+        taskId:e.taskId||null, task:t?t.name:null,
+        notes:e.notes||null,
+        billable:!!e.billable,
+        start:new Date(e.startMs).toISOString(),
+        end:new Date(e.endMs).toISOString(),
+        hours:+(entryDuration(e)/3600000).toFixed(2)
+      };
     })
   };
 }
@@ -1240,6 +2023,27 @@ function buildMarkdownSummary(data,opts){
     }
     md+=`\n`;
   }
+  if(data.incompleteWithTime && data.incompleteWithTime.length>0){
+    md+=`## In Flight — Tasks With Time Logged But Not Completed\n\n`;
+    for(const t of data.incompleteWithTime){
+      const est = t.estimatedMinutes ? ` (est ${(t.estimatedMinutes/60).toFixed(2)}h)` : '';
+      const due = t.dueDate ? ` · due ${new Date(t.dueDate).toLocaleDateString()}` : '';
+      md+=`- **${t.name}** (${t.project}${due}) — ${t.hoursLoggedThisPeriod}h this period, ${t.hoursLoggedTotal}h total${est}\n`;
+    }
+    md+=`\n`;
+  }
+  if(data.carryForward && data.carryForward.length>0){
+    md+=`## Carry Forward — Active Tasks Due Soon or Overdue\n\n`;
+    for(const t of data.carryForward){
+      const tag = t.overdue ? ' ⚠️ overdue' : '';
+      const prio = t.priority ? ` [${t.priority}]` : '';
+      md+=`- **${t.name}** (${t.project}) — due ${new Date(t.dueDate).toLocaleDateString()}${tag}${prio}\n`;
+    }
+    md+=`\n`;
+  }
+  if(data.totals.entriesMissingNotes > 0){
+    md+=`> **Quality note:** ${data.totals.entriesMissingNotes} of ${data.totals.entryCount} entries are missing notes — context that would otherwise feed into recap quality.\n\n`;
+  }
   if(opts.includeFullEntries&&data.entries.length>0){
     md+=`## All Entries\n\n| Date | Project | Subcategory | ${data.accountLabel} | Task | Notes | Hours |\n|------|---------|-------------|------|------|-------|-------|\n`;
     for(const e of data.entries){
@@ -1270,6 +2074,299 @@ async function sendToWebhook(){
   toast('Sending…');
   const res=await window.punch.postWebhook(url,{type:'punch_summary',generatedAt:new Date().toISOString(),summary:data,markdown:buildMarkdownSummary(data,opts)});
   if(res.ok) toast('Sent (HTTP '+res.status+')'); else toast('Failed: '+(res.error||'HTTP '+res.status));
+}
+
+// ------------------------------------------------------------
+// Insights tab
+// ------------------------------------------------------------
+function getInsightsRange(){
+  const sel = document.getElementById('insightsRange');
+  const val = sel ? sel.value : 'thisWeek';
+  const now = Date.now();
+  if(val === 'thisWeek') return { start: startOfWeek(now), end: now, label: 'This week' };
+  if(val === 'lastWeek'){
+    const en = startOfWeek(now) - 1;
+    const st = startOfWeek(en);
+    return { start: st, end: startOfWeek(now), label: 'Last week' };
+  }
+  if(val === 'last7') return { start: now - 7*86400000, end: now, label: 'Last 7 days' };
+  if(val === 'last14') return { start: now - 14*86400000, end: now, label: 'Last 14 days' };
+  if(val === 'last30') return { start: now - 30*86400000, end: now, label: 'Last 30 days' };
+  return { start: startOfWeek(now), end: now, label: 'This week' };
+}
+
+// Per-day rollup for the trend chart. Returns array of { dayStart, totalMs,
+// billableMs } in chronological order, length = `days`.
+function buildDailyRollup(days){
+  const today = startOfDay(Date.now());
+  const out = [];
+  for(let i = days - 1; i >= 0; i--){
+    const dayStart = today - i * 86400000;
+    const dayEnd = dayStart + 86400000;
+    let total = 0, billable = 0;
+    for(const e of state.entries){
+      if(e.endMs <= dayStart || e.startMs >= dayEnd) continue;
+      const s = Math.max(e.startMs, dayStart);
+      const en = Math.min(e.endMs, dayEnd);
+      const dur = Math.max(0, en - s);
+      total += dur;
+      if(e.billable) billable += dur;
+    }
+    if(state.activeTimer && state.activeTimer.startMs < dayEnd && Date.now() > dayStart){
+      const s = Math.max(state.activeTimer.startMs, dayStart);
+      const en = Math.min(Date.now(), dayEnd);
+      total += Math.max(0, en - s);
+    }
+    out.push({ dayStart, totalMs: total, billableMs: billable });
+  }
+  return out;
+}
+
+function renderInsights(){
+  const pane = document.querySelector('.tab-pane[data-pane="insights"]');
+  if(!pane) return;
+  const range = getInsightsRange();
+  const data = buildSummaryData(range);
+
+  // Range subtitle (small "<dateA> to <dateB>" hint next to the picker)
+  const subtitle = document.getElementById('insightsRangeLabel');
+  if(subtitle){
+    const sd = new Date(range.start).toLocaleDateString();
+    const ed = new Date(range.end).toLocaleDateString();
+    subtitle.textContent = `${sd} → ${ed}`;
+  }
+
+  renderInsightsKpis(data, range);
+  renderDailyTrendChart();
+  renderProjectBreakdownChart(data);
+  renderInsightsTaskList('insightsCompletedTasks', data.completedTasks, 'completed');
+  renderInsightsTaskList('insightsInFlight', data.incompleteWithTime, 'in-flight');
+  renderInsightsCarryForward(data.carryForward);
+  renderInsightsQuality(data, range);
+}
+
+function renderInsightsKpis(data, range){
+  const wrap = document.getElementById('insightsKpis');
+  if(!wrap) return;
+  // Active and overdue task counts are global (not period-bound) — they describe
+  // the current state of the work plan, not historical activity.
+  const activeTasks = state.tasks.filter(isTaskActive).length;
+  const overdueTasks = state.tasks.filter(t => isTaskActive(t) && t.dueDate && t.dueDate < startOfDay(Date.now())).length;
+  const billableMs = state.entries
+    .filter(e => e.billable && e.endMs >= range.start && e.startMs <= range.end)
+    .reduce((s,e) => s + Math.min(e.endMs, range.end) - Math.max(e.startMs, range.start), 0);
+  const totalMs = data.totals.hours * 3600000;
+  const notesCoverage = data.totals.entryCount > 0
+    ? Math.round(((data.totals.entryCount - (data.totals.entriesMissingNotes||0)) / data.totals.entryCount) * 100)
+    : 0;
+
+  const tiles = [
+    { value: data.totals.formatted, label: 'Tracked' },
+    { value: formatHM(billableMs), label: 'Billable' },
+    { value: data.totals.entryCount, label: 'Entries' },
+    { value: data.completedTasks.length, label: 'Tasks done' },
+    { value: activeTasks, label: 'Active tasks' },
+    { value: overdueTasks, label: 'Overdue', tone: overdueTasks > 0 ? 'warn' : '' },
+    { value: notesCoverage + '%', label: 'With notes' }
+  ];
+  wrap.innerHTML = tiles.map(t => `
+    <div class="kpi-tile${t.tone ? ' tone-'+t.tone : ''}">
+      <div class="kpi-value">${esc(String(t.value))}</div>
+      <div class="kpi-label">${esc(t.label)}</div>
+    </div>`).join('');
+}
+
+// Vertical-bar SVG chart of daily activity for the last 14 days. Each day shows
+// a billable (green) segment stacked under non-billable (amber). Bars use a
+// shared scale anchored to the busiest day so quiet days are still readable.
+function renderDailyTrendChart(){
+  const wrap = document.getElementById('insightsDailyChart');
+  if(!wrap) return;
+  const data = buildDailyRollup(14);
+  const maxMs = Math.max(...data.map(d => d.totalMs), 3600000); // floor at 1h so empty weeks don't divide-by-tiny
+  const W = 360, H = 160, padTop = 12, padBottom = 22, padLeft = 4, padRight = 4;
+  const chartH = H - padTop - padBottom;
+  const barCount = data.length;
+  const slot = (W - padLeft - padRight) / barCount;
+  const barW = Math.min(20, slot * 0.7);
+
+  let bars = '';
+  let labels = '';
+  data.forEach((d, i) => {
+    const x = padLeft + i * slot + (slot - barW) / 2;
+    const totalH = (d.totalMs / maxMs) * chartH;
+    const billH = (d.billableMs / maxMs) * chartH;
+    const nonBillH = totalH - billH;
+    const yTotal = padTop + chartH - totalH;
+    const yBill = padTop + chartH - billH;
+    const dateStr = new Date(d.dayStart).toLocaleDateString(undefined, { month:'short', day:'numeric' });
+    const tip = `${dateStr} — ${formatHM(d.totalMs)}${d.billableMs > 0 ? ` (${formatHM(d.billableMs)} billable)` : ''}`;
+    if(nonBillH > 0){
+      bars += `<rect class="bar bar-nonbill" x="${x}" y="${yTotal}" width="${barW}" height="${nonBillH}" rx="2"><title>${esc(tip)}</title></rect>`;
+    }
+    if(billH > 0){
+      bars += `<rect class="bar bar-bill" x="${x}" y="${yBill}" width="${barW}" height="${billH}" rx="2"><title>${esc(tip)}</title></rect>`;
+    }
+    if(totalH === 0){
+      // Show a faint baseline tick for empty days so the axis is readable.
+      bars += `<rect class="bar bar-empty" x="${x}" y="${padTop+chartH-2}" width="${barW}" height="2" rx="1"><title>${esc(tip)} — no entries</title></rect>`;
+    }
+    // X-axis labels — only every other day to avoid crowding.
+    if(i % 2 === barCount % 2){
+      const dayShort = new Date(d.dayStart).toLocaleDateString(undefined, { weekday:'short' });
+      labels += `<text x="${x + barW/2}" y="${H - 6}" class="axis-label" text-anchor="middle">${esc(dayShort[0])}</text>`;
+    }
+  });
+
+  // Horizontal grid lines at 25/50/75% of max for visual reference.
+  let grid = '';
+  [0.25, 0.5, 0.75, 1].forEach(frac => {
+    const y = padTop + chartH - chartH * frac;
+    grid += `<line class="grid-line" x1="${padLeft}" y1="${y}" x2="${W-padRight}" y2="${y}" />`;
+  });
+
+  const totalRange = data.reduce((s,d) => s + d.totalMs, 0);
+  const totalBill = data.reduce((s,d) => s + d.billableMs, 0);
+
+  wrap.innerHTML = `
+    <svg viewBox="0 0 ${W} ${H}" class="punch-svg-chart" preserveAspectRatio="xMidYMid meet">
+      ${grid}
+      ${bars}
+      ${labels}
+    </svg>
+    <div class="chart-footer">
+      <span class="chart-legend"><span class="dot dot-bill"></span>Billable</span>
+      <span class="chart-legend"><span class="dot dot-nonbill"></span>Non-billable</span>
+      <span class="chart-footer-total">Total: ${formatHM(totalRange)}${totalBill ? ` · ${formatHM(totalBill)} billable` : ''}</span>
+    </div>`;
+}
+
+// Horizontal stacked bars for project distribution within the selected period.
+// Each row uses the project's color; widths scale to the period's biggest project
+// so even small projects stay visible.
+function renderProjectBreakdownChart(data){
+  const wrap = document.getElementById('insightsProjectChart');
+  if(!wrap) return;
+  if(!data.projects.length){
+    wrap.innerHTML = '<div class="insights-empty">No time logged in this period.</div>';
+    return;
+  }
+  const maxHours = Math.max(...data.projects.map(p => p.hours), 0.01);
+  // Look up project color by name (project entries in summary data carry the name).
+  // Tiny inefficiency, but only runs once per render.
+  const colorByName = new Map(state.projects.map(p => [p.name, p.color]));
+  let html = '<div class="proj-bar-list">';
+  for(const p of data.projects){
+    const widthPct = (p.hours / maxHours) * 100;
+    const color = colorByName.get(p.name) || '#666';
+    html += `
+      <div class="proj-bar-row">
+        <div class="proj-bar-label" title="${esc(p.name)}">${esc(p.name)}</div>
+        <div class="proj-bar-track">
+          <div class="proj-bar-fill" style="width:${widthPct}%;background:${esc(color)}"></div>
+        </div>
+        <div class="proj-bar-value mono">${p.hours}h <span class="proj-bar-pct">${p.percent}%</span></div>
+      </div>`;
+  }
+  html += '</div>';
+  wrap.innerHTML = html;
+}
+
+function renderInsightsTaskList(targetId, items, kind){
+  const wrap = document.getElementById(targetId);
+  if(!wrap) return;
+  if(!items || items.length === 0){
+    const msg = kind === 'completed' ? 'Nothing completed in this period.' : 'No tasks in flight.';
+    wrap.innerHTML = `<div class="insights-empty">${msg}</div>`;
+    return;
+  }
+  let html = '';
+  // Cap to 8 entries per list — beyond that this becomes a wall of text and the
+  // user should jump to the Tasks tab for the full picture.
+  const shown = items.slice(0, 8);
+  for(const t of shown){
+    const accountSuffix = t.account ? ` · ${esc(t.account)}` : '';
+    if(kind === 'completed'){
+      html += `<div class="insights-item">
+        <span class="insights-item-mark insights-mark-done">✓</span>
+        <div class="insights-item-main">
+          <div class="insights-item-name">${esc(t.name)}</div>
+          <div class="insights-item-sub">${esc(t.project)}${accountSuffix} · ${t.hoursLogged}h logged</div>
+        </div>
+      </div>`;
+    } else {
+      const due = t.dueDate ? ` · due ${new Date(t.dueDate).toLocaleDateString()}` : '';
+      const est = t.estimatedMinutes ? ` · est ${(t.estimatedMinutes/60).toFixed(1)}h` : '';
+      html += `<div class="insights-item">
+        <span class="insights-item-mark insights-mark-flight">⏵</span>
+        <div class="insights-item-main">
+          <div class="insights-item-name">${esc(t.name)}</div>
+          <div class="insights-item-sub">${esc(t.project)} · ${t.hoursLoggedThisPeriod}h this period (${t.hoursLoggedTotal}h total)${est}${due}</div>
+        </div>
+      </div>`;
+    }
+  }
+  if(items.length > shown.length){
+    html += `<div class="insights-empty">…and ${items.length - shown.length} more</div>`;
+  }
+  wrap.innerHTML = html;
+}
+
+function renderInsightsCarryForward(items){
+  const wrap = document.getElementById('insightsCarryForward');
+  if(!wrap) return;
+  if(!items || items.length === 0){
+    wrap.innerHTML = '<div class="insights-empty">Nothing scheduled in the next 7 days.</div>';
+    return;
+  }
+  let html = '';
+  for(const t of items.slice(0, 12)){
+    const tone = t.overdue ? 'overdue' : '';
+    const due = new Date(t.dueDate).toLocaleDateString();
+    const prio = t.priority ? `<span class="task-priority-badge prio-${esc(t.priority)}" style="margin-left:6px">${esc(t.priority)}</span>` : '';
+    html += `<div class="insights-item ${tone ? 'insights-item-warn' : ''}">
+      <span class="insights-item-mark ${t.overdue ? 'insights-mark-overdue' : 'insights-mark-soon'}">${t.overdue ? '⚠' : '→'}</span>
+      <div class="insights-item-main">
+        <div class="insights-item-name">${esc(t.name)}${prio}</div>
+        <div class="insights-item-sub">${esc(t.project)} · due ${due}${t.overdue ? ' (overdue)' : ''}${t.hoursLoggedTotal > 0 ? ` · ${t.hoursLoggedTotal}h logged` : ''}</div>
+      </div>
+    </div>`;
+  }
+  if(items.length > 12){
+    html += `<div class="insights-empty">…and ${items.length - 12} more</div>`;
+  }
+  wrap.innerHTML = html;
+}
+
+function renderInsightsQuality(data, range){
+  const wrap = document.getElementById('insightsQuality');
+  if(!wrap) return;
+  const flags = [];
+  const missing = data.totals.entriesMissingNotes || 0;
+  if(missing > 0){
+    const pct = Math.round((missing / data.totals.entryCount) * 100);
+    flags.push({ label: `${missing} of ${data.totals.entryCount} entries missing notes (${pct}%)`, tone: pct > 25 ? 'warn' : 'info' });
+  }
+  // Estimate accuracy on tasks completed in this period that had estimates.
+  const tasksWithEst = state.tasks.filter(t => t.completed && t.completedAt >= range.start && t.completedAt <= range.end && t.estimatedMinutes);
+  if(tasksWithEst.length > 0){
+    const ratios = tasksWithEst.map(t => sumTaskMs(t.id) / 60000 / t.estimatedMinutes);
+    const avg = ratios.reduce((s,r)=>s+r,0) / ratios.length;
+    const hitCount = ratios.filter(r => r >= 0.8 && r <= 1.2).length;
+    const tone = avg > 1.5 ? 'warn' : (avg < 0.7 ? 'info' : 'good');
+    flags.push({
+      label: `Estimate accuracy: ${tasksWithEst.length} task${tasksWithEst.length===1?'':'s'} avg ${avg.toFixed(2)}× (${hitCount} within ±20%)`,
+      tone
+    });
+  }
+  if(data.completedTasks.length === 0 && data.totals.entryCount > 0){
+    flags.push({ label: 'Time logged but no tasks completed in this period.', tone: 'info' });
+  }
+  if(flags.length === 0){
+    wrap.innerHTML = '<div class="insights-empty">All clean — nothing flagged.</div>';
+    return;
+  }
+  wrap.innerHTML = flags.map(f => `<div class="quality-flag tone-${esc(f.tone)}">${esc(f.label)}</div>`).join('');
 }
 
 // ------------------------------------------------------------
@@ -1459,6 +2556,19 @@ document.getElementById('miniTimer').addEventListener('click', exitMiniMode);
     const pid=document.getElementById('projectSel').value;
     quickAddSubcat(pid,(id)=>{ renderSubcatOptions(document.getElementById('subcatSel'),pid,id); document.getElementById('subcatSel').value=id; if(state.activeTimer){ state.activeTimer.subcategoryId=id; save(); } });
   });
+  document.getElementById('btnQuickAddTask').addEventListener('click',()=>{
+    if(state.projects.length===0){ toast('Add a project first'); return; }
+    const pid=document.getElementById('projectSel').value || (state.projects[0] && state.projects[0].id);
+    openTaskModal(null, {
+      defaults: { projectId: pid },
+      onSave: (newTaskId) => {
+        renderTaskOptions(document.getElementById('taskSel'), document.getElementById('projectSel').value, newTaskId);
+        document.getElementById('taskSel').value = newTaskId;
+        applyTaskToTimerInputs(newTaskId);
+        toast('Task created and selected');
+      }
+    });
+  });
   document.getElementById('btnEntryQuickAddSubcat').addEventListener('click',()=>{
     const pid=document.getElementById('entryProject').value;
     quickAddSubcat(pid,(id)=>{ renderSubcatOptions(document.getElementById('entrySubcat'),pid,id); document.getElementById('entrySubcat').value=id; });
@@ -1495,13 +2605,20 @@ document.getElementById('miniTimer').addEventListener('click', exitMiniMode);
       document.querySelectorAll('.tab-pane').forEach(x=>x.classList.remove('active'));
       t.classList.add('active');
       document.querySelector(`.tab-pane[data-pane="${t.dataset.tab}"]`).classList.add('active');
+      // Insights is computed on demand — refresh whenever the user lands on it.
+      if(t.dataset.tab === 'insights') renderInsights();
     });
   });
+  document.getElementById('insightsRange').addEventListener('change', renderInsights);
   document.querySelectorAll('.task-filter').forEach(btn=>{
     btn.addEventListener('click',()=>{
       document.querySelectorAll('.task-filter').forEach(x=>x.classList.remove('active'));
       btn.classList.add('active'); taskFilter=btn.dataset.filter; renderTasks();
     });
+  });
+  document.getElementById('taskProjectFilter').addEventListener('change',(e)=>{
+    taskProjectFilter = e.target.value || 'all';
+    renderTasks();
   });
 
   // Entry search
@@ -1527,6 +2644,20 @@ document.getElementById('miniTimer').addEventListener('click', exitMiniMode);
     });
   });
   document.getElementById('btnLogExportCSV').addEventListener('click',exportLogCSV);
+  document.getElementById('logProjectFilter').addEventListener('change',(e)=>{
+    logProjectFilter = e.target.value || 'all';
+    // Reset task filter when changing project, since the task list is narrowed.
+    logTaskFilter = 'all';
+    renderLog();
+  });
+  document.getElementById('logTaskFilter').addEventListener('change',(e)=>{
+    logTaskFilter = e.target.value || 'all';
+    renderLog();
+  });
+  document.getElementById('logMissingNotesBtn').addEventListener('click',()=>{
+    logMissingNotesOnly = !logMissingNotesOnly;
+    renderLog();
+  });
   document.getElementById('btnAddTask').addEventListener('click',()=>openTaskModal());
   document.getElementById('btnSaveTask').addEventListener('click',saveTask);
   document.getElementById('btnDeleteTask').addEventListener('click',deleteTask);
@@ -1698,6 +2829,61 @@ function updateMiniTimer() {
 // What's New Modal
 // ------------------------------------------------------------
 const WHATS_NEW_CONTENT = {
+  '1.4.0': `
+    <h3>🎯 Tasks integrated with the timer</h3>
+    <ul>
+      <li>New Task dropdown on the Today widget — pick a task and Project / Subcategory / Account auto-fill</li>
+      <li>+ next to the dropdown creates a task without leaving the timer</li>
+      <li>Tasks can belong to <em>multiple projects</em> — use the new "Also in" chip selector</li>
+      <li>"— any project —" option lets you browse every active task; project auto-fills when you pick one</li>
+      <li>New task fields: due date, estimate (minutes), priority, status (active / completed / archived)</li>
+    </ul>
+
+    <h3>📅 Today's Plan</h3>
+    <ul>
+      <li>New section at the top of the Today tab</li>
+      <li>Surfaces overdue, due-today, and in-progress tasks</li>
+      <li>One-click start/stop, complete, edit — without leaving the screen</li>
+    </ul>
+
+    <h3>📊 Insights tab</h3>
+    <ul>
+      <li>Period selector: this week / last week / last 7 / 14 / 30 days</li>
+      <li>KPI tiles: tracked, billable, entries, tasks done, active, overdue, with-notes %</li>
+      <li>Daily activity chart — last 14 days, billable stacked</li>
+      <li>Hours-by-project chart with project colors</li>
+      <li>Tasks completed + In flight side by side</li>
+      <li>Carry-forward strip — overdue + due in next 7 days</li>
+      <li>Quality flags: missing-notes %, estimate accuracy on completed tasks</li>
+    </ul>
+
+    <h3>🔍 Log filters</h3>
+    <ul>
+      <li>Filter by Project, Task, or "missing notes"</li>
+      <li>Stacks cleanly with the existing date range and billable filters</li>
+    </ul>
+
+    <h3>📤 Export improvements</h3>
+    <ul>
+      <li>CSV now includes stable IDs alongside human-readable names</li>
+      <li>New columns: Entry ID, Project ID, Task ID, Subcategory ID, Account ID, Created (ISO)</li>
+      <li>Same schema for Today and Log exports — easier to feed into dashboards / Excel</li>
+    </ul>
+
+    <h3>🤖 AI Summary upgrades</h3>
+    <ul>
+      <li>Per-entry payload includes IDs + billable flag</li>
+      <li>New sections: "In Flight" (time logged but not done) and "Carry Forward"</li>
+      <li>Quality note when entries are missing notes</li>
+    </ul>
+
+    <h3>🛠 Migration</h3>
+    <ul>
+      <li>Existing data auto-upgrades on load — no manual steps</li>
+      <li>Old tasks pick up the new fields with safe defaults</li>
+    </ul>
+  `,
+
   '1.3.5': `
     <h3>📋 LOG Tab</h3>
     <ul>

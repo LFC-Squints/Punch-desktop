@@ -42,13 +42,18 @@
       <button id="btnTimer" class="btn-timer">START</button>
     </div>
 
-    <div class="select-row-3">
+    <div class="timer-field-row">
       <select id="projectSel" class="punch-select"></select>
+    </div>
+    <div class="timer-field-row with-add">
+      <select id="taskSel" class="punch-select"></select>
+      <button class="icon-btn amber" id="btnQuickAddTask" title="Create a new task for the selected project">+</button>
+    </div>
+    <div class="timer-field-row with-add">
       <select id="subcatSel" class="punch-select"></select>
       <button class="icon-btn amber" id="btnQuickAddSubcat" title="Add subcategory to current project">+</button>
     </div>
-
-    <div class="account-row">
+    <div class="timer-field-row">
       <select id="accountSel" class="punch-select"></select>
     </div>
 
@@ -81,6 +86,7 @@
       <button class="tab" data-tab="log">Log</button>
       <button class="tab" data-tab="tasks">Tasks</button>
       <button class="tab" data-tab="projects">Projects</button>
+      <button class="tab" data-tab="insights">Insights</button>
       <button class="tab" data-tab="summary">AI Summary</button>
       <button class="tab" data-tab="settings">Settings</button>
     </nav>
@@ -92,6 +98,7 @@
         <div class="total-cell"><div class="total-label">This week</div><div id="totalWeek" class="total-value">0:00</div></div>
         <div class="total-cell"><div class="total-label">Last 30 days</div><div id="totalMonth" class="total-value">0:00</div></div>
       </div>
+      <div id="todaysPlan" class="todays-plan"></div>
       <div class="entries-toolbar">
         <button class="btn" id="btnManualEntry">+ Manual entry</button>
         <button class="btn" id="btnExportCSV">Export CSV</button>
@@ -123,6 +130,11 @@
             <button class="log-filter" data-log-filter="nonbillable">Non-billable</button>
           </div>
         </div>
+        <div class="log-filters-row" style="margin-top:8px">
+          <select id="logProjectFilter" class="punch-select" style="max-width:200px"></select>
+          <select id="logTaskFilter" class="punch-select" style="max-width:240px"></select>
+          <button class="log-filter" id="logMissingNotesBtn" data-toggle="missing-notes">Missing notes</button>
+        </div>
       </div>
       <div class="log-totals">
         <div class="log-total-cell">
@@ -148,10 +160,13 @@
     <div class="tab-pane" data-pane="tasks">
       <div class="entries-toolbar">
         <button class="btn btn-primary" id="btnAddTask">+ New task</button>
+        <select id="taskProjectFilter" class="punch-select" style="max-width:200px"></select>
         <div class="task-filters">
           <button class="task-filter active" data-filter="active">Active</button>
+          <button class="task-filter" data-filter="thisWeek">This week</button>
           <button class="task-filter" data-filter="all">All</button>
           <button class="task-filter" data-filter="completed">Completed</button>
+          <button class="task-filter" data-filter="archived">Archived</button>
         </div>
       </div>
       <div id="tasksList" class="tasks-list"></div>
@@ -163,6 +178,52 @@
         <button class="btn btn-primary" id="btnAddProject">+ New project</button>
       </div>
       <div id="projectsList" class="projects-list"></div>
+    </div>
+
+    <!-- INSIGHTS -->
+    <div class="tab-pane" data-pane="insights">
+      <div class="insights-toolbar">
+        <div class="field-inline">
+          <label class="field-label">Period</label>
+          <select id="insightsRange" class="punch-select">
+            <option value="thisWeek" selected>This week</option>
+            <option value="lastWeek">Last week</option>
+            <option value="last7">Last 7 days</option>
+            <option value="last14">Last 14 days</option>
+            <option value="last30">Last 30 days</option>
+          </select>
+          <span id="insightsRangeLabel" class="hint-inline"></span>
+        </div>
+      </div>
+      <div id="insightsKpis" class="insights-kpis"></div>
+      <div class="insights-grid">
+        <div class="insights-card">
+          <div class="insights-card-title">Daily activity <span class="hint-inline">— last 14 days</span></div>
+          <div id="insightsDailyChart" class="insights-chart"></div>
+        </div>
+        <div class="insights-card">
+          <div class="insights-card-title">Hours by project</div>
+          <div id="insightsProjectChart" class="insights-chart"></div>
+        </div>
+      </div>
+      <div class="insights-grid">
+        <div class="insights-card">
+          <div class="insights-card-title">Tasks completed</div>
+          <div id="insightsCompletedTasks" class="insights-list"></div>
+        </div>
+        <div class="insights-card">
+          <div class="insights-card-title">In flight <span class="hint-inline">— time logged, not yet done</span></div>
+          <div id="insightsInFlight" class="insights-list"></div>
+        </div>
+      </div>
+      <div class="insights-card">
+        <div class="insights-card-title">Carry forward <span class="hint-inline">— overdue + due in next 7 days</span></div>
+        <div id="insightsCarryForward" class="insights-list"></div>
+      </div>
+      <div class="insights-card insights-quality">
+        <div class="insights-card-title">Quality</div>
+        <div id="insightsQuality"></div>
+      </div>
     </div>
 
     <!-- AI SUMMARY -->
@@ -386,7 +447,34 @@
         <div class="field"><label class="field-label">Project</label><select id="taskProject" class="punch-select"></select></div>
         <div class="field"><label class="field-label">Subcategory</label><select id="taskSubcat" class="punch-select"></select></div>
       </div>
+      <div class="field">
+        <label class="field-label">Also in <span class="hint-inline">— optional, makes this task appear under each selected project</span></label>
+        <div id="taskAlsoInProjects" class="task-also-in"></div>
+      </div>
       <div class="field"><label class="field-label" id="taskAccountLabel">Account</label><select id="taskAccount" class="punch-select"></select></div>
+      <div class="row-2">
+        <div class="field"><label class="field-label">Due date</label><input id="taskDueDate" type="date" /></div>
+        <div class="field"><label class="field-label">Estimate (min)</label><input id="taskEstimate" type="number" min="0" step="5" placeholder="e.g. 60" /></div>
+      </div>
+      <div class="row-2">
+        <div class="field">
+          <label class="field-label">Priority</label>
+          <select id="taskPriority" class="punch-select">
+            <option value="">—</option>
+            <option value="low">Low</option>
+            <option value="normal">Normal</option>
+            <option value="high">High</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="field-label">Status</label>
+          <select id="taskStatusSel" class="punch-select">
+            <option value="active">Active</option>
+            <option value="completed">Completed</option>
+            <option value="archived">Archived</option>
+          </select>
+        </div>
+      </div>
       <div class="field"><label class="field-label">Notes / context</label><textarea id="taskNotes" placeholder="Details, links, next steps…" rows="4" style="width:100%;resize:vertical"></textarea></div>
       <div class="modal-actions">
         <button class="btn btn-danger" id="btnDeleteTask" style="margin-right:auto">Delete</button>

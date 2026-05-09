@@ -357,3 +357,315 @@ body.widget-mode .full-view { display: none; }
   position: absolute;
   left: -16px;
 }
+
+/* ============================================================
+   Tasks-as-work-plan additions
+   ============================================================ */
+
+/* Timer widget rows (replaces the old select-row-3 / account-row layout) */
+.timer-field-row { margin-bottom: 6px; }
+.timer-field-row.with-add { display: grid; grid-template-columns: 1fr auto; gap: 6px; align-items: center; }
+
+/* Task badges on task cards */
+.task-due-badge {
+  font-family: 'JetBrains Mono', monospace; font-size: 10px;
+  padding: 1px 6px; border-radius: 3px;
+  background: var(--surface-3); color: var(--text-dim);
+}
+.task-due-badge.due-today { background: var(--amber-dim); color: var(--amber); }
+.task-due-badge.due-overdue { background: rgba(227,91,91,0.15); color: var(--red); }
+
+.task-estimate-badge {
+  font-family: 'JetBrains Mono', monospace; font-size: 10px;
+  padding: 1px 6px; border-radius: 3px;
+  background: var(--surface-3); color: var(--text-faint);
+}
+
+.task-priority-badge {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600;
+  padding: 1px 6px; border-radius: 3px;
+}
+.task-priority-badge.prio-low { background: rgba(91,155,227,0.15); color: var(--blue); }
+.task-priority-badge.prio-normal { background: var(--surface-3); color: var(--text-dim); }
+.task-priority-badge.prio-high { background: rgba(227,91,91,0.15); color: var(--red); }
+
+.task-archived-badge {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600;
+  padding: 1px 6px; border-radius: 3px;
+  background: var(--surface-3); color: var(--text-faint);
+}
+
+.task-running-badge { font-size: 10px; color: var(--amber); font-weight: 600; }
+
+.task-card.running { border-color: rgba(232,155,67,0.4); box-shadow: 0 0 0 1px rgba(232,155,67,0.2); }
+.task-card.archived { opacity: 0.5; }
+
+/* Project card stats */
+.project-stats { display: flex; align-items: center; gap: 14px; margin-top: 4px; flex-wrap: wrap; }
+.project-stat { font-size: 11px; color: var(--text-dim); }
+.project-stat-num { font-family: 'JetBrains Mono', monospace; color: var(--text); font-weight: 600; }
+.project-view-tasks {
+  margin-left: auto; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em;
+  color: var(--text-faint); padding: 4px 8px; border-radius: 4px; transition: all 0.15s;
+  font-weight: 600;
+}
+.project-view-tasks:hover { color: var(--amber); background: var(--amber-dim); }
+
+/* Log filter row 2 */
+.log-filter.active { color: var(--amber); border: 1px solid rgba(232,155,67,0.4); background: var(--amber-dim); }
+
+/* Task modal grew taller; let it scroll */
+#taskModal .modal { max-height: calc(100vh - 24px); }
+
+/* "Also in" chip row inside the task modal */
+.task-also-in {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 8px; background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 6px;
+  min-height: 40px; align-items: center;
+}
+.task-also-in-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px 4px 8px; border-radius: 14px;
+  background: var(--surface); border: 1px solid var(--border);
+  cursor: pointer; font-size: 12px; color: var(--text-dim);
+  transition: all 0.15s; user-select: none;
+}
+.task-also-in-chip:hover { border-color: var(--border-strong); color: var(--text); }
+.task-also-in-chip.selected {
+  background: var(--amber-dim); border-color: rgba(232,155,67,0.4); color: var(--text);
+}
+.task-also-in-chip input[type="checkbox"] {
+  width: 12px; height: 12px; margin: 0; padding: 0;
+  accent-color: var(--amber); cursor: pointer;
+}
+.task-chip-swatch { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+.task-chip-name { white-space: nowrap; }
+
+/* Multi-project badge on task cards */
+.task-multi-badge {
+  font-size: 10px; padding: 1px 6px; border-radius: 3px;
+  background: rgba(152,116,227,0.15); color: var(--purple);
+  font-weight: 500;
+}
+
+/* ============================================================
+   Today's Plan section
+   ============================================================ */
+.todays-plan {
+  margin-bottom: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.todays-plan.empty-hidden { display: none; }
+.todays-plan-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px;
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.15em;
+  color: var(--amber);
+  background: var(--amber-dim);
+  border-bottom: 1px solid var(--border);
+}
+.todays-plan-title::before { content: "▸ "; opacity: 0.6; }
+.todays-plan-count { color: var(--text-faint); font-weight: 500; letter-spacing: 0.1em; }
+
+.todays-plan-empty {
+  padding: 18px 16px;
+  font-size: 12px;
+  color: var(--text-faint);
+  text-align: center;
+}
+
+.todays-plan-list { display: flex; flex-direction: column; }
+
+.plan-item {
+  display: grid;
+  grid-template-columns: 18px 4px 1fr auto;
+  gap: 10px; align-items: center;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  transition: background 0.1s;
+}
+.plan-item:first-child { border-top: 0; }
+.plan-item:hover { background: var(--surface-2); }
+.plan-item.running { background: rgba(232,155,67,0.05); }
+
+.plan-checkbox {
+  width: 18px; height: 18px; border-radius: 4px;
+  border: 2px solid var(--border-strong);
+  cursor: pointer; transition: all 0.15s;
+}
+.plan-checkbox:hover { border-color: var(--green); }
+
+.plan-bar { width: 4px; height: 28px; border-radius: 2px; }
+
+.plan-main { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.plan-name { font-weight: 600; font-size: 13px; color: var(--text); }
+.plan-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.plan-project { font-size: 11px; color: var(--text-dim); }
+.plan-due, .plan-est { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-faint); }
+.plan-logged { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--amber); padding: 1px 6px; background: var(--amber-dim); border-radius: 3px; }
+
+.plan-type-badge {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.1em; font-weight: 700;
+  padding: 2px 7px; border-radius: 10px;
+}
+.plan-type-badge.type-overdue { background: rgba(227,91,91,0.15); color: var(--red); }
+.plan-type-badge.type-due-today { background: var(--amber-dim); color: var(--amber); }
+.plan-type-badge.type-in-progress { background: rgba(91,155,227,0.15); color: var(--blue); }
+
+.plan-actions { display: flex; gap: 4px; opacity: 0; transition: opacity 0.15s; }
+.plan-item:hover .plan-actions, .plan-item.running .plan-actions { opacity: 1; }
+
+.link-btn {
+  background: none; border: none; padding: 0;
+  font-size: 12px; color: var(--amber); cursor: pointer;
+  text-decoration: underline; text-decoration-color: rgba(232,155,67,0.4);
+  text-underline-offset: 2px;
+}
+.link-btn:hover { color: var(--amber-glow); text-decoration-color: var(--amber-glow); }
+
+/* ============================================================
+   Insights tab
+   ============================================================ */
+.insights-toolbar {
+  display: flex; align-items: center; gap: 12px;
+  margin-bottom: 14px;
+}
+
+.insights-kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  margin-bottom: 16px;
+}
+.kpi-tile {
+  background: var(--surface);
+  padding: 12px 14px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.kpi-tile.tone-warn { background: rgba(227,91,91,0.08); }
+.kpi-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 20px; font-weight: 500;
+  color: var(--text); letter-spacing: -0.02em;
+}
+.kpi-tile.tone-warn .kpi-value { color: var(--red); }
+.kpi-label {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.18em;
+  color: var(--text-faint); font-weight: 600;
+}
+
+.insights-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.insights-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 12px;
+}
+.insights-grid .insights-card { margin-bottom: 0; }
+.insights-card-title {
+  font-size: 11px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.15em; color: var(--text);
+  margin-bottom: 12px;
+  display: flex; align-items: center; gap: 8px;
+}
+.insights-empty {
+  padding: 18px 8px; text-align: center;
+  color: var(--text-faint); font-size: 12px;
+}
+
+/* SVG chart shared styling */
+.punch-svg-chart { width: 100%; height: auto; display: block; }
+.punch-svg-chart .grid-line { stroke: var(--border); stroke-width: 1; stroke-dasharray: 2 4; opacity: 0.5; }
+.punch-svg-chart .axis-label { fill: var(--text-faint); font-size: 9px; font-family: 'JetBrains Mono', monospace; }
+.punch-svg-chart .bar { transition: opacity 0.15s; }
+.punch-svg-chart .bar:hover { opacity: 0.8; }
+.punch-svg-chart .bar-bill { fill: var(--green); }
+.punch-svg-chart .bar-nonbill { fill: var(--amber); }
+.punch-svg-chart .bar-empty { fill: var(--border-strong); opacity: 0.5; }
+
+.chart-footer {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  margin-top: 8px; font-size: 10px; color: var(--text-faint);
+  font-family: 'JetBrains Mono', monospace;
+}
+.chart-legend { display: inline-flex; align-items: center; gap: 5px; }
+.chart-legend .dot { width: 8px; height: 8px; border-radius: 2px; }
+.chart-legend .dot-bill { background: var(--green); }
+.chart-legend .dot-nonbill { background: var(--amber); }
+.chart-footer-total { margin-left: auto; }
+
+/* Project bar list */
+.proj-bar-list { display: flex; flex-direction: column; gap: 6px; }
+.proj-bar-row {
+  display: grid;
+  grid-template-columns: 110px 1fr 80px;
+  gap: 10px; align-items: center;
+}
+.proj-bar-label {
+  font-size: 12px; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.proj-bar-track {
+  height: 14px; background: var(--surface-2);
+  border-radius: 7px; overflow: hidden;
+}
+.proj-bar-fill {
+  height: 100%; border-radius: 7px;
+  transition: width 0.3s ease;
+}
+.proj-bar-value {
+  font-size: 11px; color: var(--text-dim);
+  text-align: right;
+}
+.proj-bar-pct { color: var(--text-faint); margin-left: 4px; }
+
+/* Insights item rows (tasks completed / in-flight / carry-forward) */
+.insights-list { display: flex; flex-direction: column; gap: 8px; }
+.insights-item {
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  gap: 10px; align-items: start;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+.insights-item:first-child { border-top: 0; padding-top: 0; }
+.insights-item-mark {
+  font-size: 14px;
+  width: 18px; text-align: center;
+  font-weight: 700;
+}
+.insights-mark-done { color: var(--green); }
+.insights-mark-flight { color: var(--blue); }
+.insights-mark-overdue { color: var(--red); }
+.insights-mark-soon { color: var(--amber); }
+.insights-item-name { font-weight: 600; font-size: 13px; color: var(--text); margin-bottom: 2px; }
+.insights-item-sub { font-size: 11px; color: var(--text-dim); }
+.insights-item-warn .insights-item-name { color: var(--red); }
+
+/* Quality flags */
+.insights-quality { background: var(--surface-2); }
+.quality-flag {
+  font-size: 12px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  margin-bottom: 6px;
+  border-left: 3px solid var(--border-strong);
+}
+.quality-flag:last-child { margin-bottom: 0; }
+.quality-flag.tone-warn { border-left-color: var(--red); color: var(--text); background: rgba(227,91,91,0.08); }
+.quality-flag.tone-info { border-left-color: var(--blue); color: var(--text-dim); }
+.quality-flag.tone-good { border-left-color: var(--green); color: var(--text-dim); }
