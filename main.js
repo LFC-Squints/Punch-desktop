@@ -1,5 +1,5 @@
 // ============================================================
-// Punch — Electron main process (v1.4.0)
+// Punch — Electron main process (v1.4.1)
 // Tray app, frameless widget, global hotkeys, idle detection,
 // active-window polling, and GitHub-based auto-updates.
 // ============================================================
@@ -145,78 +145,46 @@ function updateTrayTooltip(timerText, projectName) {
   }
 }
 
-function updateTaskbarIcon(timerText) {
-  if (!mainWindow || process.platform !== 'win32') {
-    console.log('[taskbar] Skipped - not Windows or no window');
-    return;
-  }
-  
-  console.log('[taskbar] Updating icon with:', timerText);
-  
+// The renderer draws the icon now (browser HTML5 canvas — no native deps).
+// This function just decodes the PNG data URL and hands it to setIcon.
+// Eliminates the asar / DLL loading fragility that broke v1.4.0 in packaged builds.
+function updateTaskbarIcon(timerText, dataUrl) {
+  if (!mainWindow || process.platform !== 'win32') return;
+
   if (!timerText) {
-    // Restore original icon when timer stops
+    // Timer stopped — restore the app's original icon and clear any overlay.
     try {
-      const originalIcon = nativeImage.createFromPath(path.join(__dirname, 'assets', 'icon.png'));
-      if (!originalIcon.isEmpty()) {
-        mainWindow.setIcon(originalIcon);
+      const iconPng = nativeImage.createFromPath(path.join(__dirname, 'assets', 'icon.png'));
+      if (!iconPng.isEmpty()) {
+        mainWindow.setIcon(iconPng);
+      } else {
+        // Fallback for older builds that only shipped icon.ico
+        const iconIco = nativeImage.createFromPath(path.join(__dirname, 'assets', 'icon.ico'));
+        if (!iconIco.isEmpty()) mainWindow.setIcon(iconIco);
       }
     } catch (e) {
-      console.log('[taskbar] Could not restore original icon');
+      writeLog(`[taskbar] restore failed: ${e.message}`);
     }
-    // Also clear overlay
-    mainWindow.setOverlayIcon(null, '');
-    console.log('[taskbar] Icon restored to default');
+    try { mainWindow.setOverlayIcon(null, ''); } catch (_) {}
     return;
   }
-  
+
+  if (!dataUrl) {
+    // Renderer didn't send a data URL — nothing safe to draw. Surface to log
+    // so we can spot it, but don't crash the tick.
+    writeLog('[taskbar] update called without dataUrl — skipped');
+    return;
+  }
+
   try {
-    // Create a MASSIVE canvas - taskbar will shrink it
-    const canvas = require('canvas');
-    const cvs = canvas.createCanvas(512, 512);
-    const ctx = cvs.getContext('2d');
-    
-    // Solid dark background
-    ctx.fillStyle = '#1a1a1a';
-    ctx.fillRect(0, 0, 512, 512);
-    
-    // Add a subtle border for definition
-    ctx.strokeStyle = '#333333';
-    ctx.lineWidth = 4;
-    ctx.strokeRect(2, 2, 508, 508);
-    
-    // Show MM:SS format - SPLIT VERTICALLY
-    const parts = timerText.split(':');
-    const minutes = parts.length === 3 ? parts[1] : parts[0];
-    const seconds = parts.length === 3 ? parts[2] : parts[1];
-    
-    // Draw the time - MASSIVE font, stacked vertically
-    ctx.fillStyle = '#e89b43';
-    ctx.textAlign = 'center';
-    
-    // Use monospace for better digit alignment
-    ctx.font = 'bold 200px Consolas, monospace';
-    
-    // Draw minutes on top
-    ctx.textBaseline = 'bottom';
-    ctx.fillText(minutes, 256, 240);
-    
-    // Draw separator
-    ctx.font = 'bold 80px Consolas, monospace';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(':', 256, 256);
-    
-    // Draw seconds on bottom
-    ctx.font = 'bold 200px Consolas, monospace';
-    ctx.textBaseline = 'top';
-    ctx.fillText(seconds, 256, 272);
-    
-    console.log('[taskbar] Icon set successfully');
-    
-    // Convert canvas to icon
-    const img = nativeImage.createFromDataURL(cvs.toDataURL());
+    const img = nativeImage.createFromDataURL(dataUrl);
+    if (img.isEmpty()) {
+      writeLog('[taskbar] decoded image was empty — skipped');
+      return;
+    }
     mainWindow.setIcon(img);
   } catch (err) {
-    console.error('[taskbar] Error creating icon:', err);
+    writeLog(`[taskbar] setIcon failed: ${err.message}`);
   }
 }
 
@@ -327,7 +295,7 @@ ipcMain.handle('data:save', async (_e, data) => {
 });
 ipcMain.handle('data:path', () => dataFile);
 ipcMain.handle('tray:update-tooltip', (_e, { timerText, projectName }) => updateTrayTooltip(timerText, projectName));
-ipcMain.handle('taskbar:update-overlay', (_e, { timerText }) => updateTaskbarIcon(timerText));
+ipcMain.handle('taskbar:update-overlay', (_e, { timerText, dataUrl }) => updateTaskbarIcon(timerText, dataUrl));
 ipcMain.handle('window:resize', (_e, { width, height }) => { mainWindow?.setSize(width, height, true); });
 ipcMain.handle('window:set-always-on-top', (_e, on) => { mainWindow?.setAlwaysOnTop(!!on); });
 ipcMain.handle('window:minimize', () => mainWindow?.minimize());

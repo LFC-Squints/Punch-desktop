@@ -1015,14 +1015,67 @@ function startTick(){
     document.getElementById('readout').textContent=elapsed;
     updateMiniTimer();
     renderTotals();
-    
+
     // Update tray tooltip with timer
     const project = getProject(state.activeTimer.projectId);
     window.punch.updateTrayTooltip(elapsed, project ? project.name : 'Unknown Project');
-    
-    // Update taskbar overlay icon with timer
-    window.punch.updateTaskbarOverlay(elapsed);
+
+    // Draw the taskbar icon here in the renderer using the browser's built-in
+    // canvas — keeps us off the native `canvas` npm package, which is fragile
+    // when bundled inside an Electron asar (the root cause of the v1.4.0
+    // taskbar regression). We send the resulting PNG data URL to main, which
+    // just decodes it and calls setIcon.
+    const iconDataUrl = buildTaskbarIconDataUrl(elapsed);
+    window.punch.updateTaskbarOverlay(elapsed, iconDataUrl);
   },1000);
+}
+
+// Lazily-reused canvas element — same instance every tick so we don't churn
+// the DOM. Sized 256×256 which Windows happily downscales for the taskbar.
+let _taskbarCanvas = null;
+function buildTaskbarIconDataUrl(timerText){
+  if(!_taskbarCanvas){
+    _taskbarCanvas = document.createElement('canvas');
+    _taskbarCanvas.width = 256;
+    _taskbarCanvas.height = 256;
+  }
+  const cvs = _taskbarCanvas;
+  const ctx = cvs.getContext('2d');
+  const SIZE = 256;
+
+  // Dark background + subtle border, matches the brand
+  ctx.fillStyle = '#1a1a1a';
+  ctx.fillRect(0, 0, SIZE, SIZE);
+  ctx.strokeStyle = '#333333';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(1, 1, SIZE - 2, SIZE - 2);
+
+  // Pick which two parts to show. timerText is always HH:MM:SS from formatHMS,
+  // so once hours >= 1 we switch to HH:MM — minutes-and-seconds isn't useful
+  // when you've been at it for an hour.
+  const parts = timerText.split(':');
+  const hours = parseInt(parts[0], 10) || 0;
+  const showHourMode = hours >= 1;
+  const top    = showHourMode ? parts[0] : parts[1];
+  const bottom = showHourMode ? parts[1] : parts[2];
+
+  ctx.fillStyle = '#e89b43';
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 110px Consolas, "Courier New", monospace';
+
+  ctx.textBaseline = 'bottom';
+  ctx.fillText(top, SIZE / 2, SIZE / 2 - 6);
+
+  // Smaller colon between the two digit blocks
+  ctx.font = 'bold 50px Consolas, "Courier New", monospace';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(':', SIZE / 2, SIZE / 2);
+
+  ctx.font = 'bold 110px Consolas, "Courier New", monospace';
+  ctx.textBaseline = 'top';
+  ctx.fillText(bottom, SIZE / 2, SIZE / 2 + 6);
+
+  return cvs.toDataURL('image/png');
 }
 function stopTick(){ 
   if(tickInterval) clearInterval(tickInterval); 
@@ -2829,6 +2882,15 @@ function updateMiniTimer() {
 // What's New Modal
 // ------------------------------------------------------------
 const WHATS_NEW_CONTENT = {
+  '1.4.1': `
+    <h3>🐛 Taskbar timer hotfix</h3>
+    <ul>
+      <li>Fixed: the live taskbar icon countdown stopped working in v1.4.0 packaged builds</li>
+      <li>Drawing now happens in the renderer (browser canvas) instead of the native canvas npm package — no more asar / DLL packaging fragility</li>
+      <li>After 1 hour the taskbar icon switches from <strong>MM:SS</strong> to <strong>HH:MM</strong>, so long sessions show useful info</li>
+    </ul>
+  `,
+
   '1.4.0': `
     <h3>🎯 Tasks integrated with the timer</h3>
     <ul>
