@@ -2881,6 +2881,16 @@ function updateMiniTimer() {
 // What's New Modal
 // ------------------------------------------------------------
 const WHATS_NEW_CONTENT = {
+  '1.4.4': `
+    <h3>📌 Pinned-shortcut friendly</h3>
+    <ul>
+      <li>v1.4.3's process-level AUMID wasn't enough to escape a pinned shortcut's binding — Windows had already locked the taskbar entry by the time our code ran</li>
+      <li>Now uses <strong>per-window</strong> AppDetails to claim a separate AUMID at the window level, applied before the window becomes visible</li>
+      <li>Result with a pinned Punch shortcut: the pinned entry stays static, and a <strong>separate live-timer entry</strong> appears while the app runs (Steam-style two-icon behavior)</li>
+      <li>Without pinning: same single live-timer entry as v1.4.3</li>
+    </ul>
+  `,
+
   '1.4.3': `
     <h3>⏱ Full taskbar icon replacement</h3>
     <ul>

@@ -1,5 +1,5 @@
 // ============================================================
-// Punch — Electron main process (v1.4.3)
+// Punch — Electron main process (v1.4.4)
 // Tray app, frameless widget, global hotkeys, idle detection,
 // active-window polling, and GitHub-based auto-updates.
 // ============================================================
@@ -89,6 +89,27 @@ function createWindow() {
       contextIsolation: true, nodeIntegration: false, sandbox: false
     }
   });
+
+  // Force the window into its own taskbar entry by claiming a per-window AUMID
+  // via Windows' shell property store. The process-level setAppUserModelId
+  // (set at the top of this file) is sometimes "too late" — if Punch was
+  // launched via a pinned shortcut, Windows already bound the taskbar entry
+  // to the shortcut's AUMID. setAppDetails is window-level and applied
+  // before the window becomes visible, so Windows treats it as authoritative.
+  // Result on installed builds where Punch is pinned: pinned entry stays
+  // static, AND a separate live-icon entry appears while the app runs
+  // (Steam-style two-icon behavior). Without pinning, this still gives the
+  // single live-icon entry users see on the desktop-shortcut launch path.
+  if (process.platform === 'win32') {
+    try {
+      mainWindow.setAppDetails({
+        appId: 'com.justin.punch.timer',
+        relaunchDisplayName: 'Punch'
+      });
+    } catch (e) {
+      writeLog(`[taskbar] setAppDetails failed: ${e.message}`);
+    }
+  }
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   mainWindow.once('ready-to-show', () => mainWindow.show());
