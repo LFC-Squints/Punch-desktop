@@ -1,5 +1,5 @@
 // ============================================================
-// Punch — Electron main process (v1.4.2)
+// Punch — Electron main process (v1.4.3)
 // Tray app, frameless widget, global hotkeys, idle detection,
 // active-window polling, and GitHub-based auto-updates.
 // ============================================================
@@ -33,6 +33,21 @@ function writeLog(msg) {
 
 process.on('uncaughtException',  (err) => writeLog(`uncaughtException: ${err.stack || err}`));
 process.on('unhandledRejection', (err) => writeLog(`unhandledRejection: ${err?.stack || err}`));
+
+// Use a runtime-specific AppUserModelID, distinct from the installer's
+// `appId` (com.justin.punch). When the two match, Windows groups the running
+// window under the installer shortcut's taskbar entry and uses the shortcut's
+// icon — which means setIcon updates the in-window icon but the taskbar
+// stays static. By claiming a different AUMID here, the running window gets
+// its own taskbar entry whose icon we fully control via setIcon. This is what
+// makes the live MM:SS / HH:MM countdown actually appear on the taskbar of
+// installed builds (v1.3.4 only worked because portable launches don't go
+// through the AUMID-grouping path).
+//
+// Must be set before any windows are created.
+if (process.platform === 'win32') {
+  try { app.setAppUserModelId('com.justin.punch.timer'); } catch (_) {}
+}
 
 const DEFAULT_HOTKEY = 'CommandOrControl+Alt+P';
 const WIDGET_SIZE = { width: 360, height: 380 };
@@ -145,19 +160,16 @@ function updateTrayTooltip(timerText, projectName) {
   }
 }
 
-// The renderer draws two images each tick:
-//   - dataUrl: full 256×256 timer icon → mainWindow.setIcon. Works on
-//     portable/unpacked builds but Windows IGNORES it for the taskbar of
-//     installed apps because of AUMID grouping (the shortcut's icon wins).
-//   - badgeDataUrl: 32×32 amber corner badge → mainWindow.setOverlayIcon.
-//     This is the API Windows respects on grouped/installed builds.
-// We call both — whichever one Windows honors for the user's install style,
-// they get a working taskbar indicator.
-function updateTaskbarIcon(timerText, dataUrl, badgeDataUrl) {
+// The renderer draws the full 256×256 timer icon each tick and sends it as a
+// PNG data URL. We decode and call setIcon. The runtime AUMID set at startup
+// keeps the window from grouping under the installer shortcut, so setIcon
+// actually controls the taskbar icon on installed builds.
+function updateTaskbarIcon(timerText, dataUrl) {
   if (!mainWindow || process.platform !== 'win32') return;
 
   if (!timerText) {
-    // Timer stopped — restore the app's original icon and clear the badge.
+    // Timer stopped — restore the app's original icon. Also clear any
+    // legacy setOverlayIcon state from prior versions, defensively.
     try {
       const iconPng = nativeImage.createFromPath(path.join(__dirname, 'assets', 'icon.png'));
       if (!iconPng.isEmpty()) {
@@ -174,31 +186,20 @@ function updateTaskbarIcon(timerText, dataUrl, badgeDataUrl) {
     return;
   }
 
-  // Corner-badge path — the one that actually shows on installed builds.
-  if (badgeDataUrl) {
-    try {
-      const badge = nativeImage.createFromDataURL(badgeDataUrl);
-      if (!badge.isEmpty()) {
-        // Second arg is an accessibility description, surfaced by screen readers.
-        mainWindow.setOverlayIcon(badge, `Timer: ${timerText}`);
-      } else {
-        writeLog('[taskbar] badge image was empty — overlay not set');
-      }
-    } catch (err) {
-      writeLog(`[taskbar] setOverlayIcon failed: ${err.message}`);
-    }
+  if (!dataUrl) {
+    writeLog('[taskbar] update called without dataUrl — skipped');
+    return;
   }
 
-  // Full-icon path — wins on portable/unpacked builds where setIcon affects
-  // the taskbar directly; harmless on installed builds (just updates the
-  // in-window icon, which the user rarely sees).
-  if (dataUrl) {
-    try {
-      const img = nativeImage.createFromDataURL(dataUrl);
-      if (!img.isEmpty()) mainWindow.setIcon(img);
-    } catch (err) {
-      writeLog(`[taskbar] setIcon failed: ${err.message}`);
+  try {
+    const img = nativeImage.createFromDataURL(dataUrl);
+    if (img.isEmpty()) {
+      writeLog('[taskbar] decoded image was empty — skipped');
+      return;
     }
+    mainWindow.setIcon(img);
+  } catch (err) {
+    writeLog(`[taskbar] setIcon failed: ${err.message}`);
   }
 }
 
@@ -309,7 +310,7 @@ ipcMain.handle('data:save', async (_e, data) => {
 });
 ipcMain.handle('data:path', () => dataFile);
 ipcMain.handle('tray:update-tooltip', (_e, { timerText, projectName }) => updateTrayTooltip(timerText, projectName));
-ipcMain.handle('taskbar:update-overlay', (_e, { timerText, dataUrl, badgeDataUrl }) => updateTaskbarIcon(timerText, dataUrl, badgeDataUrl));
+ipcMain.handle('taskbar:update-overlay', (_e, { timerText, dataUrl }) => updateTaskbarIcon(timerText, dataUrl));
 ipcMain.handle('window:resize', (_e, { width, height }) => { mainWindow?.setSize(width, height, true); });
 ipcMain.handle('window:set-always-on-top', (_e, on) => { mainWindow?.setAlwaysOnTop(!!on); });
 ipcMain.handle('window:minimize', () => mainWindow?.minimize());

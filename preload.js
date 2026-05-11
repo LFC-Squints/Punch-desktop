@@ -14,7 +14,7 @@ contextBridge.exposeInMainWorld('punch', {
   setMinSize: (minWidth, minHeight) => ipcRenderer.invoke('window:set-min-size', { minWidth, minHeight }),
   setAlwaysOnTop: (on) => ipcRenderer.invoke('window:set-always-on-top', on),
   updateTrayTooltip: (timerText, projectName) => ipcRenderer.invoke('tray:update-tooltip', { timerText, projectName }),
-  updateTaskbarOverlay: (timerText, dataUrl, badgeDataUrl) => ipcRenderer.invoke('taskbar:update-overlay', { timerText, dataUrl, badgeDataUrl }),
+  updateTaskbarOverlay: (timerText, dataUrl) => ipcRenderer.invoke('taskbar:update-overlay', { timerText, dataUrl }),
   minimize: () => ipcRenderer.invoke('window:minimize'),
   hide: () => ipcRenderer.invoke('window:hide'),
   quitApp: () => ipcRenderer.invoke('window:close-app'),

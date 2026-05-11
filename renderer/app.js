@@ -1020,18 +1020,12 @@ function startTick(){
     const project = getProject(state.activeTimer.projectId);
     window.punch.updateTrayTooltip(elapsed, project ? project.name : 'Unknown Project');
 
-    // We send two images to main every tick:
-    //   1) iconDataUrl — full 256×256 icon for setIcon. Affects the taskbar
-    //      only on portable/unpacked builds; on installed/AUMID-grouped builds
-    //      Windows uses the shortcut's icon and ignores setIcon for the
-    //      taskbar (it still updates the in-window icon though).
-    //   2) badgeDataUrl — small 32×32 amber pill for setOverlayIcon. This is
-    //      what Windows actually displays as a corner badge on installed
-    //      builds, regardless of grouping. Practical info only — seconds in
-    //      the first minute, minutes after, then "Xh" once we cross an hour.
+    // Renderer draws the 256×256 timer icon and sends it as a PNG data URL.
+    // Main decodes and calls setIcon. v1.4.3's runtime AUMID change makes
+    // this actually update the installed-build taskbar icon (previously
+    // grouped under the shortcut's static icon).
     const iconDataUrl = buildTaskbarIconDataUrl(elapsed);
-    const badgeDataUrl = buildTaskbarBadgeDataUrl(elapsed);
-    window.punch.updateTaskbarOverlay(elapsed, iconDataUrl, badgeDataUrl);
+    window.punch.updateTaskbarOverlay(elapsed, iconDataUrl);
   },1000);
 }
 
@@ -1079,52 +1073,6 @@ function buildTaskbarIconDataUrl(timerText){
   ctx.font = 'bold 110px Consolas, "Courier New", monospace';
   ctx.textBaseline = 'top';
   ctx.fillText(bottom, SIZE / 2, SIZE / 2 + 6);
-
-  return cvs.toDataURL('image/png');
-}
-
-// Small (32×32) amber pill used as setOverlayIcon — Windows downscales this
-// to ~16px in the corner of the taskbar icon. We can only fit 1–3 characters
-// legibly at that size, so the text is the most-useful magnitude:
-//   < 1 min  → seconds (so the badge isn't blank at startup)
-//   < 1 hr   → minutes
-//   ≥ 1 hr   → hours with an "h" suffix
-let _taskbarBadgeCanvas = null;
-function buildTaskbarBadgeDataUrl(timerText){
-  const parts = timerText.split(':');
-  const hours   = parseInt(parts[0], 10) || 0;
-  const minutes = parseInt(parts[1], 10) || 0;
-  const seconds = parseInt(parts[2], 10) || 0;
-
-  let text;
-  if(hours >= 1) text = hours + 'h';
-  else if(minutes >= 1) text = String(minutes);
-  else text = String(seconds);
-
-  if(!_taskbarBadgeCanvas){
-    _taskbarBadgeCanvas = document.createElement('canvas');
-    _taskbarBadgeCanvas.width = 32;
-    _taskbarBadgeCanvas.height = 32;
-  }
-  const cvs = _taskbarBadgeCanvas;
-  const ctx = cvs.getContext('2d');
-  const SIZE = 32;
-
-  ctx.clearRect(0, 0, SIZE, SIZE);
-
-  // Amber filled circle for high contrast against any taskbar theme
-  ctx.fillStyle = '#e89b43';
-  ctx.beginPath();
-  ctx.arc(SIZE/2, SIZE/2, SIZE/2 - 1, 0, Math.PI * 2);
-  ctx.fill();
-
-  // Dark text inside — shrink font as text length grows so it always fits
-  ctx.fillStyle = '#1a1a1a';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  const fontSize = text.length === 1 ? 22 : (text.length === 2 ? 18 : 14);
-  ctx.font = `bold ${fontSize}px Consolas, "Courier New", monospace`;
-  ctx.fillText(text, SIZE/2, SIZE/2 + 1);
 
   return cvs.toDataURL('image/png');
 }
@@ -2933,6 +2881,18 @@ function updateMiniTimer() {
 // What's New Modal
 // ------------------------------------------------------------
 const WHATS_NEW_CONTENT = {
+  '1.4.3': `
+    <h3>⏱ Full taskbar icon replacement</h3>
+    <ul>
+      <li>The Windows taskbar icon now fully replaces with the live MM:SS countdown (and HH:MM after 1 hour), like in v1.3.4 portable</li>
+      <li>Achieved by claiming a runtime-specific AppUserModelID so the window doesn't group under the installer shortcut (whose icon was overriding setIcon)</li>
+      <li>Drops the v1.4.2 corner-badge approach</li>
+    </ul>
+    <p style="font-size:11px;color:var(--text-faint);margin-top:8px">
+      Note: if you've <em>pinned</em> Punch to the taskbar, you may now see two entries while the app is running (the pinned shortcut + the running window). Launching from the desktop or Start Menu shortcut behaves normally with a single taskbar entry.
+    </p>
+  `,
+
   '1.4.2': `
     <h3>🐛 Taskbar badge now actually shows on installed builds</h3>
     <ul>
