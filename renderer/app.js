@@ -1020,13 +1020,18 @@ function startTick(){
     const project = getProject(state.activeTimer.projectId);
     window.punch.updateTrayTooltip(elapsed, project ? project.name : 'Unknown Project');
 
-    // Draw the taskbar icon here in the renderer using the browser's built-in
-    // canvas — keeps us off the native `canvas` npm package, which is fragile
-    // when bundled inside an Electron asar (the root cause of the v1.4.0
-    // taskbar regression). We send the resulting PNG data URL to main, which
-    // just decodes it and calls setIcon.
+    // We send two images to main every tick:
+    //   1) iconDataUrl — full 256×256 icon for setIcon. Affects the taskbar
+    //      only on portable/unpacked builds; on installed/AUMID-grouped builds
+    //      Windows uses the shortcut's icon and ignores setIcon for the
+    //      taskbar (it still updates the in-window icon though).
+    //   2) badgeDataUrl — small 32×32 amber pill for setOverlayIcon. This is
+    //      what Windows actually displays as a corner badge on installed
+    //      builds, regardless of grouping. Practical info only — seconds in
+    //      the first minute, minutes after, then "Xh" once we cross an hour.
     const iconDataUrl = buildTaskbarIconDataUrl(elapsed);
-    window.punch.updateTaskbarOverlay(elapsed, iconDataUrl);
+    const badgeDataUrl = buildTaskbarBadgeDataUrl(elapsed);
+    window.punch.updateTaskbarOverlay(elapsed, iconDataUrl, badgeDataUrl);
   },1000);
 }
 
@@ -1074,6 +1079,52 @@ function buildTaskbarIconDataUrl(timerText){
   ctx.font = 'bold 110px Consolas, "Courier New", monospace';
   ctx.textBaseline = 'top';
   ctx.fillText(bottom, SIZE / 2, SIZE / 2 + 6);
+
+  return cvs.toDataURL('image/png');
+}
+
+// Small (32×32) amber pill used as setOverlayIcon — Windows downscales this
+// to ~16px in the corner of the taskbar icon. We can only fit 1–3 characters
+// legibly at that size, so the text is the most-useful magnitude:
+//   < 1 min  → seconds (so the badge isn't blank at startup)
+//   < 1 hr   → minutes
+//   ≥ 1 hr   → hours with an "h" suffix
+let _taskbarBadgeCanvas = null;
+function buildTaskbarBadgeDataUrl(timerText){
+  const parts = timerText.split(':');
+  const hours   = parseInt(parts[0], 10) || 0;
+  const minutes = parseInt(parts[1], 10) || 0;
+  const seconds = parseInt(parts[2], 10) || 0;
+
+  let text;
+  if(hours >= 1) text = hours + 'h';
+  else if(minutes >= 1) text = String(minutes);
+  else text = String(seconds);
+
+  if(!_taskbarBadgeCanvas){
+    _taskbarBadgeCanvas = document.createElement('canvas');
+    _taskbarBadgeCanvas.width = 32;
+    _taskbarBadgeCanvas.height = 32;
+  }
+  const cvs = _taskbarBadgeCanvas;
+  const ctx = cvs.getContext('2d');
+  const SIZE = 32;
+
+  ctx.clearRect(0, 0, SIZE, SIZE);
+
+  // Amber filled circle for high contrast against any taskbar theme
+  ctx.fillStyle = '#e89b43';
+  ctx.beginPath();
+  ctx.arc(SIZE/2, SIZE/2, SIZE/2 - 1, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Dark text inside — shrink font as text length grows so it always fits
+  ctx.fillStyle = '#1a1a1a';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const fontSize = text.length === 1 ? 22 : (text.length === 2 ? 18 : 14);
+  ctx.font = `bold ${fontSize}px Consolas, "Courier New", monospace`;
+  ctx.fillText(text, SIZE/2, SIZE/2 + 1);
 
   return cvs.toDataURL('image/png');
 }
@@ -2882,6 +2933,16 @@ function updateMiniTimer() {
 // What's New Modal
 // ------------------------------------------------------------
 const WHATS_NEW_CONTENT = {
+  '1.4.2': `
+    <h3>🐛 Taskbar badge now actually shows on installed builds</h3>
+    <ul>
+      <li>v1.4.1's icon redraw worked in dev mode but Windows ignored it on installed builds — AppUserModelID grouping uses the shortcut's icon, not the window icon</li>
+      <li>Now uses <strong>setOverlayIcon</strong> instead: a small amber pill in the bottom-right of the taskbar icon, which Windows respects regardless of grouping</li>
+      <li>Badge shows seconds in the first minute, then minutes, then <strong>Xh</strong> once you cross 1 hour</li>
+      <li>Portable/unpacked builds still get the full icon redraw as before</li>
+    </ul>
+  `,
+
   '1.4.1': `
     <h3>🐛 Taskbar timer hotfix</h3>
     <ul>

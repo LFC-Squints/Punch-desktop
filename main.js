@@ -1,5 +1,5 @@
 // ============================================================
-// Punch — Electron main process (v1.4.1)
+// Punch — Electron main process (v1.4.2)
 // Tray app, frameless widget, global hotkeys, idle detection,
 // active-window polling, and GitHub-based auto-updates.
 // ============================================================
@@ -145,14 +145,19 @@ function updateTrayTooltip(timerText, projectName) {
   }
 }
 
-// The renderer draws the icon now (browser HTML5 canvas — no native deps).
-// This function just decodes the PNG data URL and hands it to setIcon.
-// Eliminates the asar / DLL loading fragility that broke v1.4.0 in packaged builds.
-function updateTaskbarIcon(timerText, dataUrl) {
+// The renderer draws two images each tick:
+//   - dataUrl: full 256×256 timer icon → mainWindow.setIcon. Works on
+//     portable/unpacked builds but Windows IGNORES it for the taskbar of
+//     installed apps because of AUMID grouping (the shortcut's icon wins).
+//   - badgeDataUrl: 32×32 amber corner badge → mainWindow.setOverlayIcon.
+//     This is the API Windows respects on grouped/installed builds.
+// We call both — whichever one Windows honors for the user's install style,
+// they get a working taskbar indicator.
+function updateTaskbarIcon(timerText, dataUrl, badgeDataUrl) {
   if (!mainWindow || process.platform !== 'win32') return;
 
   if (!timerText) {
-    // Timer stopped — restore the app's original icon and clear any overlay.
+    // Timer stopped — restore the app's original icon and clear the badge.
     try {
       const iconPng = nativeImage.createFromPath(path.join(__dirname, 'assets', 'icon.png'));
       if (!iconPng.isEmpty()) {
@@ -169,22 +174,31 @@ function updateTaskbarIcon(timerText, dataUrl) {
     return;
   }
 
-  if (!dataUrl) {
-    // Renderer didn't send a data URL — nothing safe to draw. Surface to log
-    // so we can spot it, but don't crash the tick.
-    writeLog('[taskbar] update called without dataUrl — skipped');
-    return;
+  // Corner-badge path — the one that actually shows on installed builds.
+  if (badgeDataUrl) {
+    try {
+      const badge = nativeImage.createFromDataURL(badgeDataUrl);
+      if (!badge.isEmpty()) {
+        // Second arg is an accessibility description, surfaced by screen readers.
+        mainWindow.setOverlayIcon(badge, `Timer: ${timerText}`);
+      } else {
+        writeLog('[taskbar] badge image was empty — overlay not set');
+      }
+    } catch (err) {
+      writeLog(`[taskbar] setOverlayIcon failed: ${err.message}`);
+    }
   }
 
-  try {
-    const img = nativeImage.createFromDataURL(dataUrl);
-    if (img.isEmpty()) {
-      writeLog('[taskbar] decoded image was empty — skipped');
-      return;
+  // Full-icon path — wins on portable/unpacked builds where setIcon affects
+  // the taskbar directly; harmless on installed builds (just updates the
+  // in-window icon, which the user rarely sees).
+  if (dataUrl) {
+    try {
+      const img = nativeImage.createFromDataURL(dataUrl);
+      if (!img.isEmpty()) mainWindow.setIcon(img);
+    } catch (err) {
+      writeLog(`[taskbar] setIcon failed: ${err.message}`);
     }
-    mainWindow.setIcon(img);
-  } catch (err) {
-    writeLog(`[taskbar] setIcon failed: ${err.message}`);
   }
 }
 
@@ -295,7 +309,7 @@ ipcMain.handle('data:save', async (_e, data) => {
 });
 ipcMain.handle('data:path', () => dataFile);
 ipcMain.handle('tray:update-tooltip', (_e, { timerText, projectName }) => updateTrayTooltip(timerText, projectName));
-ipcMain.handle('taskbar:update-overlay', (_e, { timerText, dataUrl }) => updateTaskbarIcon(timerText, dataUrl));
+ipcMain.handle('taskbar:update-overlay', (_e, { timerText, dataUrl, badgeDataUrl }) => updateTaskbarIcon(timerText, dataUrl, badgeDataUrl));
 ipcMain.handle('window:resize', (_e, { width, height }) => { mainWindow?.setSize(width, height, true); });
 ipcMain.handle('window:set-always-on-top', (_e, on) => { mainWindow?.setAlwaysOnTop(!!on); });
 ipcMain.handle('window:minimize', () => mainWindow?.minimize());
