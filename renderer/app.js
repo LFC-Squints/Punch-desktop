@@ -2881,6 +2881,17 @@ function updateMiniTimer() {
 // What's New Modal
 // ------------------------------------------------------------
 const WHATS_NEW_CONTENT = {
+  '1.4.5': `
+    <h3>📌 Pinned + live timer — proper Steam-style two-icon behavior</h3>
+    <ul>
+      <li>v1.4.3 and v1.4.4 tried to override the main window's AUMID — Windows ignored both because it binds the launch-process taskbar entry before our JS can react</li>
+      <li>v1.4.5 follows Steam's actual approach: when the timer starts, Punch creates a tiny invisible <em>secondary</em> window with its own AUMID. Windows treats it as a separate app and gives it its own taskbar entry</li>
+      <li><strong>Result:</strong> your pinned Punch entry stays right where it is, and a separate taskbar entry with the live MM:SS / HH:MM countdown appears while a timer is running. When you stop the timer, that entry disappears</li>
+      <li>Same behavior whether you launch Punch from the pinned shortcut, desktop shortcut, or Start Menu</li>
+      <li>Clicking the live-timer entry focuses the main Punch window</li>
+    </ul>
+  `,
+
   '1.4.4': `
     <h3>📌 Pinned-shortcut friendly</h3>
     <ul>

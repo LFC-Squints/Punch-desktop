@@ -1,5 +1,5 @@
 // ============================================================
-// Punch — Electron main process (v1.4.4)
+// Punch — Electron main process (v1.4.5)
 // Tray app, frameless widget, global hotkeys, idle detection,
 // active-window polling, and GitHub-based auto-updates.
 // ============================================================
@@ -33,21 +33,6 @@ function writeLog(msg) {
 
 process.on('uncaughtException',  (err) => writeLog(`uncaughtException: ${err.stack || err}`));
 process.on('unhandledRejection', (err) => writeLog(`unhandledRejection: ${err?.stack || err}`));
-
-// Use a runtime-specific AppUserModelID, distinct from the installer's
-// `appId` (com.justin.punch). When the two match, Windows groups the running
-// window under the installer shortcut's taskbar entry and uses the shortcut's
-// icon — which means setIcon updates the in-window icon but the taskbar
-// stays static. By claiming a different AUMID here, the running window gets
-// its own taskbar entry whose icon we fully control via setIcon. This is what
-// makes the live MM:SS / HH:MM countdown actually appear on the taskbar of
-// installed builds (v1.3.4 only worked because portable launches don't go
-// through the AUMID-grouping path).
-//
-// Must be set before any windows are created.
-if (process.platform === 'win32') {
-  try { app.setAppUserModelId('com.justin.punch.timer'); } catch (_) {}
-}
 
 const DEFAULT_HOTKEY = 'CommandOrControl+Alt+P';
 const WIDGET_SIZE = { width: 360, height: 380 };
@@ -89,27 +74,6 @@ function createWindow() {
       contextIsolation: true, nodeIntegration: false, sandbox: false
     }
   });
-
-  // Force the window into its own taskbar entry by claiming a per-window AUMID
-  // via Windows' shell property store. The process-level setAppUserModelId
-  // (set at the top of this file) is sometimes "too late" — if Punch was
-  // launched via a pinned shortcut, Windows already bound the taskbar entry
-  // to the shortcut's AUMID. setAppDetails is window-level and applied
-  // before the window becomes visible, so Windows treats it as authoritative.
-  // Result on installed builds where Punch is pinned: pinned entry stays
-  // static, AND a separate live-icon entry appears while the app runs
-  // (Steam-style two-icon behavior). Without pinning, this still gives the
-  // single live-icon entry users see on the desktop-shortcut launch path.
-  if (process.platform === 'win32') {
-    try {
-      mainWindow.setAppDetails({
-        appId: 'com.justin.punch.timer',
-        relaunchDisplayName: 'Punch'
-      });
-    } catch (e) {
-      writeLog(`[taskbar] setAppDetails failed: ${e.message}`);
-    }
-  }
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   mainWindow.once('ready-to-show', () => mainWindow.show());
@@ -181,29 +145,99 @@ function updateTrayTooltip(timerText, projectName) {
   }
 }
 
-// The renderer draws the full 256×256 timer icon each tick and sends it as a
-// PNG data URL. We decode and call setIcon. The runtime AUMID set at startup
-// keeps the window from grouping under the installer shortcut, so setIcon
-// actually controls the taskbar icon on installed builds.
+// Steam-style approach: create a tiny invisible "timer window" off-screen
+// with its own AppUserModelID. Windows treats it as a separate app and gives
+// it its own taskbar entry, distinct from the pinned shortcut. We never
+// touch the main window's AUMID, so Punch's main entry groups normally with
+// the pinned shortcut (or with itself on desktop launches). Setting the
+// icon on this ghost window is what shows the live MM:SS countdown.
+//
+// Earlier approaches (v1.4.3 process AUMID, v1.4.4 main-window setAppDetails)
+// failed because Windows binds the launching process's taskbar entry to the
+// shortcut's AUMID before our JS runs, and changing AUMID after the fact
+// doesn't move an existing entry. A brand-new window doesn't have that
+// pre-existing binding, so its setAppDetails actually controls grouping.
+let timerWindow = null;
+
+function ensureTimerWindow() {
+  if (timerWindow && !timerWindow.isDestroyed()) return timerWindow;
+
+  timerWindow = new BrowserWindow({
+    width: 1, height: 1,
+    x: -32000, y: -32000,           // off-screen
+    show: false,
+    frame: false,
+    transparent: true,
+    skipTaskbar: false,             // show in taskbar
+    focusable: false,               // don't steal focus; also excludes from Alt+Tab on Windows
+    minimizable: false,
+    maximizable: false,
+    resizable: false,
+    alwaysOnTop: false,
+    title: 'Punch Timer',
+    icon: nativeImage.createEmpty(),
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+      backgroundThrottling: true
+    }
+  });
+
+  if (process.platform === 'win32') {
+    try {
+      timerWindow.setAppDetails({
+        appId: 'com.justin.punch.live',
+        relaunchDisplayName: 'Punch Timer'
+      });
+    } catch (e) {
+      writeLog(`[taskbar] timerWindow setAppDetails failed: ${e.message}`);
+    }
+  }
+
+  // Trivial content; we just need a BrowserWindow object to host a taskbar entry.
+  timerWindow.loadURL('data:text/html,<html><body style="margin:0;background:transparent"></body></html>');
+
+  // If the user clicks the timer window's taskbar entry, focus the main Punch
+  // window instead (the timer window itself is invisible).
+  timerWindow.on('focus', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (!mainWindow.isVisible()) mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+
+  // Don't actually close on user attempt (e.g. right-click → Close) — just hide.
+  timerWindow.on('close', (e) => {
+    if (!isQuitting) {
+      e.preventDefault();
+      timerWindow.hide();
+    }
+  });
+
+  return timerWindow;
+}
+
+function destroyTimerWindow() {
+  if (timerWindow && !timerWindow.isDestroyed()) {
+    timerWindow.removeAllListeners('close');
+    timerWindow.destroy();
+  }
+  timerWindow = null;
+}
+
+// Per-tick taskbar update. The renderer draws the live MM:SS / HH:MM icon
+// and sends it as a PNG data URL. We push it to the ghost timerWindow, which
+// has its own AUMID and shows as a separate taskbar entry.
 function updateTaskbarIcon(timerText, dataUrl) {
-  if (!mainWindow || process.platform !== 'win32') return;
+  if (process.platform !== 'win32') return;
 
   if (!timerText) {
-    // Timer stopped — restore the app's original icon. Also clear any
-    // legacy setOverlayIcon state from prior versions, defensively.
-    try {
-      const iconPng = nativeImage.createFromPath(path.join(__dirname, 'assets', 'icon.png'));
-      if (!iconPng.isEmpty()) {
-        mainWindow.setIcon(iconPng);
-      } else {
-        // Fallback for older builds that only shipped icon.ico
-        const iconIco = nativeImage.createFromPath(path.join(__dirname, 'assets', 'icon.ico'));
-        if (!iconIco.isEmpty()) mainWindow.setIcon(iconIco);
-      }
-    } catch (e) {
-      writeLog(`[taskbar] restore failed: ${e.message}`);
+    // Timer stopped — hide the ghost entry. The main Punch entry is
+    // untouched (was never modified in the running case).
+    if (timerWindow && !timerWindow.isDestroyed()) {
+      try { timerWindow.hide(); } catch (_) {}
     }
-    try { mainWindow.setOverlayIcon(null, ''); } catch (_) {}
     return;
   }
 
@@ -218,9 +252,14 @@ function updateTaskbarIcon(timerText, dataUrl) {
       writeLog('[taskbar] decoded image was empty — skipped');
       return;
     }
-    mainWindow.setIcon(img);
+    const w = ensureTimerWindow();
+    w.setIcon(img);
+    if (!w.isVisible()) {
+      // showInactive avoids stealing focus from whatever the user is doing.
+      w.showInactive();
+    }
   } catch (err) {
-    writeLog(`[taskbar] setIcon failed: ${err.message}`);
+    writeLog(`[taskbar] update failed: ${err.message}`);
   }
 }
 
@@ -387,4 +426,5 @@ app.on('will-quit', () => {
   globalShortcut.unregisterAll();
   stopIdlePoll();
   stopActiveWinPoll();
+  destroyTimerWindow();
 });
