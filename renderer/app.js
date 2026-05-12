@@ -10,14 +10,29 @@ const DEFAULT_HOTKEY = 'CommandOrControl+Alt+P';
 const WIDGET_SIZE = { width: 360, height: 380 };
 const FULL_SIZE   = { width: 920, height: 720 };
 
+// Bumped to 2 with the productivity feature set (nudges, daily closeouts,
+// auto carry-forward). Migrations live in migrateData().
+const CURRENT_SCHEMA_VERSION = 2;
+
+const defaultProductivitySettings = () => ({
+  workingHours: { start: '09:00', end: '17:00', days: [1,2,3,4,5] }, // Mon–Fri
+  nudgePauseUntil: null,            // ms epoch; null = not paused
+  presentationModeEnabled: false,
+  mentalBreakSeeded: false,         // one-time flag so we only auto-seed once
+  defaultRespectWorkingHours: true
+});
+
 const defaultData = () => ({
+  schemaVersion: CURRENT_SCHEMA_VERSION,
   projects: [{ id:'p_default', name:'General', color:'#e89b43', archived:false, subcategories:[] }],
   entries: [], tasks: [], accounts: [], activeTimer: null, rules: [],
+  nudges: [], nudgeEvents: [], dailyCloseouts: [],
   settings: {
     hotkey: DEFAULT_HOTKEY, alwaysOnTop: true,
     idleEnabled: true, idleThresholdMin: 5,
     autodetectEnabled: false, webhookUrl: '',
-    accountLabel: 'Account'
+    accountLabel: 'Account',
+    productivity: defaultProductivitySettings()
   },
   nextId: 2
 });
@@ -72,8 +87,21 @@ async function init(){
 
 function mergeWithDefaults(loaded){
   const d = defaultData();
+  // Run any version-specific migrations first, then apply defensive defaults.
+  loaded = migrateData(loaded);
   const merged = { ...d, ...loaded };
-  merged.settings = { ...d.settings, ...(loaded.settings || {}) };
+  // Settings is nested — merge top-level keys *and* the productivity namespace.
+  const loadedSettings = loaded.settings || {};
+  merged.settings = { ...d.settings, ...loadedSettings };
+  merged.settings.productivity = {
+    ...d.settings.productivity,
+    ...(loadedSettings.productivity || {})
+  };
+  // Working hours nested object — be safe if older data has a partial shape.
+  merged.settings.productivity.workingHours = {
+    ...d.settings.productivity.workingHours,
+    ...((loadedSettings.productivity && loadedSettings.productivity.workingHours) || {})
+  };
   merged.projects = (loaded.projects || []).map(p => ({ archived:false, subcategories:[], ...p }));
   merged.entries  = (loaded.entries  || []).map(e => ({
     taskId: null,
@@ -86,8 +114,26 @@ function mergeWithDefaults(loaded){
   merged.tasks    = (loaded.tasks    || []).map(normalizeTaskShape);
   merged.accounts = loaded.accounts || [];
   merged.rules    = loaded.rules    || [];
+  merged.nudges        = (loaded.nudges || []).map(normalizeNudgeShape);
+  merged.nudgeEvents   = loaded.nudgeEvents || [];
+  merged.dailyCloseouts = loaded.dailyCloseouts || [];
   merged.nextId   = loaded.nextId   || 1;
+  merged.schemaVersion = CURRENT_SCHEMA_VERSION;
   return merged;
+}
+
+// Versioned migrations. New installs already match CURRENT_SCHEMA_VERSION via
+// defaultData(), so this is a no-op for them. v1 → v2 adds nudges/closeouts
+// and a productivity settings namespace — those are all populated by the
+// defensive defaults in mergeWithDefaults, so the migration step itself
+// just stamps the version. Future migrations that need to reshape data
+// (e.g. moving a field) will live here as `if (fromVersion < N) { … }` blocks.
+function migrateData(loaded){
+  if(!loaded || typeof loaded !== 'object') return loaded;
+  const fromVersion = loaded.schemaVersion || 1;
+  if(fromVersion >= CURRENT_SCHEMA_VERSION) return loaded;
+  // (Future shape transforms go here, ordered by version.)
+  return loaded;
 }
 
 // Normalize a task to the current schema, preserving existing fields.
@@ -118,12 +164,45 @@ function normalizeTaskShape(t){
     dueDate: null,
     estimatedMinutes: null,
     priority: null,
+    // Productivity / carry-forward fields. carryForwardCount is a "how many
+    // times has this slipped" signal that future reporting can surface; both
+    // auto carry-forward (next-day app open) and the End Day "Carry to
+    // tomorrow" action increment it. dailyPriorityRank is reserved for a
+    // future Focus tab ordering feature — keep it nullable for now.
+    carryForwardCount: 0,
+    lastCarriedForwardAt: null,
+    dailyPriorityRank: null,
     ...t,
     projectIds,
     projectId: primary, // keep alias in sync
     status,
     completed: status === 'completed',
     updatedAt: t.updatedAt || t.createdAt || Date.now()
+  };
+}
+
+// Normalize a nudge to the current schema. Per-entity defaults follow the
+// same defensive-spread pattern as tasks so older data loads cleanly.
+function normalizeNudgeShape(n){
+  return {
+    id: n.id,
+    name: n.name || 'Untitled nudge',
+    message: n.message || '',
+    category: n.category || 'Custom',
+    intervalMinutes: typeof n.intervalMinutes === 'number' ? n.intervalMinutes : 60,
+    activeDays: Array.isArray(n.activeDays) ? n.activeDays : [1,2,3,4,5],
+    activeStartTime: n.activeStartTime || '09:00',
+    activeEndTime: n.activeEndTime || '17:00',
+    defaultSnoozeMinutes: typeof n.defaultSnoozeMinutes === 'number' ? n.defaultSnoozeMinutes : 15,
+    enabled: n.enabled !== false, // default true
+    respectWorkingHours: n.respectWorkingHours !== false,
+    allowWhenActiveOutsideHours: !!n.allowWhenActiveOutsideHours,
+    timedDurationMinutes: typeof n.timedDurationMinutes === 'number' ? n.timedDurationMinutes : null,
+    createdAt: n.createdAt || Date.now(),
+    updatedAt: n.updatedAt || Date.now(),
+    lastTriggeredAt: n.lastTriggeredAt || null,
+    archivedAt: n.archivedAt || null,
+    snoozeUntil: n.snoozeUntil || null // per-nudge snooze state
   };
 }
 
