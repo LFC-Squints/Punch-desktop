@@ -1,5 +1,5 @@
 // ============================================================
-// Punch — renderer logic v1.3.3
+// Punch — renderer logic v1.5.0
 // ============================================================
 
 const SWATCH_PALETTE = [
@@ -80,8 +80,17 @@ async function init(){
   bindUI();
   applySettings();
   buildSwatches();
+
+  // One-time productivity init. autoCarryForward bumps overdue active tasks
+  // so they appear on today's plan even if the user never opens End Day.
+  // maybeSeedMentalBreakNudge adds the disabled preset the first time a
+  // user opens v1.5.0 — discoverable in Settings, off by default.
+  autoCarryForwardOverdueTasks();
+  maybeSeedMentalBreakNudge();
+
   renderAll();
   attachIPCListeners();
+  startNudgeScheduler();
   if (state.activeTimer) startTick();
 }
 
@@ -978,6 +987,7 @@ function renderAll(){
   renderTimerWidget(); renderTotals(); renderTodaysPlan(); renderEntries();
   renderTasks(); renderProjects(); renderRules();
   renderAccountsList(); updateAccountLabels(); renderLog();
+  renderNudgeManager(); renderNudgePauseStatus();
 }
 
 // ------------------------------------------------------------
@@ -2207,6 +2217,626 @@ async function sendToWebhook(){
   if(res.ok) toast('Sent (HTTP '+res.status+')'); else toast('Failed: '+(res.error||'HTTP '+res.status));
 }
 
+// ============================================================
+// PRODUCTIVITY — Selectors, Services, Coach Card
+// ------------------------------------------------------------
+// Reusable data layer for Nudges, End Day, and any future Focus tab.
+// Selectors are pure (no mutation, no save()). Services own mutations.
+// The split exists so the same `buildDailyCloseoutPreview` powers both
+// the End Day modal today and an AI summary/Focus dashboard later.
+// ============================================================
+
+// ----- Selectors: pure read-only over `state` -----
+
+// startOfDay-anchored window for a given date.
+function dayWindow(dateMs){
+  const start = startOfDay(dateMs);
+  return { start, end: start + 86400000 };
+}
+
+// Sum project totals (ms) for a single day. Returns [{ projectId, name, color, ms }]
+// sorted desc by ms. Used by closeout summary and daily reports.
+function getProjectTotalsForDate(dateMs){
+  const { start, end } = dayWindow(dateMs);
+  const totals = new Map();
+  for(const e of state.entries){
+    if(e.endMs <= start || e.startMs >= end) continue;
+    const s = Math.max(e.startMs, start), en = Math.min(e.endMs, end);
+    const dur = en - s; if(dur <= 0) continue;
+    totals.set(e.projectId, (totals.get(e.projectId) || 0) + dur);
+  }
+  if(state.activeTimer){
+    const s = Math.max(state.activeTimer.startMs, start), en = Math.min(Date.now(), end);
+    if(en > s) totals.set(state.activeTimer.projectId,
+      (totals.get(state.activeTimer.projectId) || 0) + (en - s));
+  }
+  return [...totals.entries()]
+    .map(([pid, ms]) => {
+      const p = getProject(pid);
+      return { projectId: pid, name: p ? p.name : '(deleted project)', color: p ? p.color : '#666', ms };
+    })
+    .sort((a,b) => b.ms - a.ms);
+}
+
+// Tasks completed on the given calendar day (based on completedAt).
+function getCompletedTasksForDate(dateMs){
+  const { start, end } = dayWindow(dateMs);
+  return state.tasks.filter(t =>
+    taskStatus(t) === 'completed' && t.completedAt && t.completedAt >= start && t.completedAt < end
+  );
+}
+
+// Active tasks that should appear in a daily closeout: due today, overdue,
+// or had time logged today but not yet completed. Pure: does not mutate.
+function getIncompleteTasksForDate(dateMs){
+  const { start, end } = dayWindow(dateMs);
+  const tomorrowStart = end;
+  const idsWithTimeToday = new Set();
+  for(const e of state.entries){
+    if(!e.taskId) continue;
+    if(e.endMs > start && e.startMs < end) idsWithTimeToday.add(e.taskId);
+  }
+  if(state.activeTimer && state.activeTimer.taskId){
+    idsWithTimeToday.add(state.activeTimer.taskId);
+  }
+  return state.tasks.filter(t => {
+    if(!isTaskActive(t)) return false;
+    if(t.dueDate && t.dueDate < tomorrowStart) return true; // due today or overdue
+    if(idsWithTimeToday.has(t.id)) return true;
+    return false;
+  });
+}
+
+// Carry-forward candidates: subset of incomplete tasks that should *default*
+// to "carry to tomorrow" in End Day. Right now = same as incomplete; future
+// versions may exclude tasks the user explicitly pinned to today, etc.
+function getCarryForwardCandidates(dateMs){
+  return getIncompleteTasksForDate(dateMs);
+}
+
+// Entries from a given day with empty/whitespace notes. Returns entry objects.
+function getMissingNoteEntries(dateMs){
+  const { start, end } = dayWindow(dateMs);
+  return state.entries.filter(e =>
+    e.endMs > start && e.startMs < end && !(e.notes || '').trim()
+  );
+}
+
+// Longest single entry on the day, useful for "longest focus block" stats.
+function getLongestEntryForDate(dateMs){
+  const { start, end } = dayWindow(dateMs);
+  let best = null, bestMs = 0;
+  for(const e of state.entries){
+    if(e.endMs <= start || e.startMs >= end) continue;
+    const dur = Math.min(e.endMs, end) - Math.max(e.startMs, start);
+    if(dur > bestMs){ bestMs = dur; best = e; }
+  }
+  return best ? { entry: best, durationMs: bestMs } : null;
+}
+
+// Aggregate stats over a nudgeEvent date range. Drives future analytics
+// dashboards; the Nudges Settings panel uses a slimmer view of this.
+function getNudgeStats(rangeStartMs, rangeEndMs){
+  const events = state.nudgeEvents.filter(e =>
+    e.triggeredAt >= rangeStartMs && e.triggeredAt <= rangeEndMs);
+  const byNudge = new Map();
+  let done=0, snoozed=0, skipped=0, missed=0;
+  for(const e of events){
+    if(!byNudge.has(e.nudgeId)) byNudge.set(e.nudgeId, { triggered:0, done:0, snoozed:0, skipped:0, missed:0 });
+    const acc = byNudge.get(e.nudgeId);
+    acc.triggered++;
+    if(e.response === 'done'){ done++; acc.done++; }
+    else if(e.response === 'snoozed'){ snoozed++; acc.snoozed++; }
+    else if(e.response === 'skipped'){ skipped++; acc.skipped++; }
+    else { missed++; acc.missed++; }
+  }
+  return {
+    triggered: events.length, done, snoozed, skipped, missed,
+    byNudge: [...byNudge.entries()].map(([nudgeId, s]) => {
+      const n = state.nudges.find(x => x.id === nudgeId);
+      return { nudgeId, name: n ? n.name : '(deleted)', ...s };
+    })
+  };
+}
+
+// Closeout history within an optional range, newest first.
+function getCloseoutHistory(rangeStartMs, rangeEndMs){
+  let list = state.dailyCloseouts || [];
+  if(rangeStartMs != null) list = list.filter(c => c.closedAt >= rangeStartMs);
+  if(rangeEndMs != null) list = list.filter(c => c.closedAt <= rangeEndMs);
+  return [...list].sort((a,b) => b.closedAt - a.closedAt);
+}
+
+// ----- Coach Card -----
+
+// Rule-based daily prompt. Returns { text, category } or null. Designed for
+// reuse — End Day, Today, Insights, and a future Focus tab can all call this
+// with a context bundle. Original lines; no famous-quote datasets.
+function getDailyCoachCard(context){
+  const c = context || {};
+  if(c.carryForwardCount >= 5){
+    return { text: 'Reduce drag. Carry forward only what still matters this week.', category: 'reduce-drag' };
+  }
+  if(c.missingNotesCount > 0 && c.missingNotesCount >= Math.max(2, Math.floor(c.entryCount * 0.3))){
+    return { text: 'Context compounds. A clean note today makes the week easier to review.', category: 'context' };
+  }
+  if(c.completedTasksCount === 0 && c.totalTrackedMs >= 3 * 3600000){
+    return { text: 'Effort without an outcome is a draft. Close one loop before the day ends.', category: 'effort-to-outcome' };
+  }
+  if(c.dominantProjectPercent >= 70){
+    return { text: 'One project owned the day. If that was the plan, good. If not, redistribute tomorrow.', category: 'dominant-project' };
+  }
+  if(c.completedTasksCount > 0 && c.carryForwardCount === 0 && c.missingNotesCount === 0){
+    return { text: 'Momentum beats intention. Tomorrow, pick the next useful move and start it early.', category: 'momentum' };
+  }
+  if(c.totalTrackedMs === 0){
+    return { text: 'Quiet day on the timer. If that was intentional, no notes needed. If not, what blocked you?', category: 'quiet' };
+  }
+  return { text: 'If it matters, inspect it. Close the loop before the day ends.', category: 'default' };
+}
+
+// ----- Auto carry-forward -----
+
+// Runs once at app load. Migrates active tasks whose dueDate is strictly in
+// the past so the user doesn't have to manually push them every morning.
+// Idempotent for the same calendar day via lastCarriedForwardAt: a task
+// already auto-carried today won't be touched a second time if the app is
+// reopened later. End Day's explicit carry uses a separate path that still
+// increments the counter even on the same day.
+function autoCarryForwardOverdueTasks(){
+  const todayStart = startOfDay(Date.now());
+  let bumped = 0;
+  for(const t of state.tasks){
+    if(!isTaskActive(t)) continue;
+    if(!t.dueDate || t.dueDate >= todayStart) continue;
+    if(t.lastCarriedForwardAt && t.lastCarriedForwardAt >= todayStart) continue;
+    // Bump dueDate to today (not tomorrow) — the task is already overdue, the
+    // user expects it on today's plan, not pushed another day out.
+    t.dueDate = todayStart;
+    t.carryForwardCount = (t.carryForwardCount || 0) + 1;
+    t.lastCarriedForwardAt = Date.now();
+    t.updatedAt = Date.now();
+    // Overdue tasks get a priority bump to high (unless already higher).
+    if(t.priority !== 'high') t.priority = 'high';
+    bumped++;
+  }
+  if(bumped > 0) save();
+  return bumped;
+}
+
+// ----- Closeout: preview (pure) and commit (mutating) -----
+
+// Build a structured snapshot of a day's work — used for the End Day modal,
+// future weekly closeouts, and AI summary input. Pure: does not write state.
+// Names are snapshotted at build time so the resulting record stays readable
+// even if a project is renamed/deleted later.
+function buildDailyCloseoutPreview(dateMs){
+  const day = dateMs || Date.now();
+  const { start, end } = dayWindow(day);
+  const isToday = startOfDay(Date.now()) === start;
+  const observedEnd = isToday ? Date.now() : end;
+
+  const projectTotals = getProjectTotalsForDate(day);
+  const totalTrackedMs = projectTotals.reduce((s,p) => s + p.ms, 0);
+  const completedTasks = getCompletedTasksForDate(day).map(t => {
+    const p = getProject(taskPrimaryProject(t));
+    return {
+      id: t.id, name: t.name,
+      projectId: taskPrimaryProject(t), projectName: p ? p.name : '(deleted project)',
+      completedAt: t.completedAt,
+      loggedTodayMs: sumTaskMsToday(t.id)
+    };
+  });
+  const incompleteTasks = getIncompleteTasksForDate(day).map(t => {
+    const p = getProject(taskPrimaryProject(t));
+    const isOverdue = t.dueDate && t.dueDate < start;
+    const isDueToday = t.dueDate && t.dueDate >= start && t.dueDate < end;
+    return {
+      id: t.id, name: t.name,
+      projectId: taskPrimaryProject(t), projectName: p ? p.name : '(deleted project)',
+      dueDate: t.dueDate || null,
+      priority: t.priority || null,
+      carryForwardCount: t.carryForwardCount || 0,
+      loggedTodayMs: sumTaskMsToday(t.id),
+      isOverdue: !!isOverdue,
+      isDueToday: !!isDueToday,
+      // Default action shown in End Day. Overdue/due-today default to carry.
+      // In-progress-today-only defaults to keep (user has been working on it).
+      defaultAction: (isOverdue || isDueToday) ? 'carry' : 'keep'
+    };
+  });
+  const missingNoteEntries = getMissingNoteEntries(day).map(e => {
+    const p = getProject(e.projectId);
+    return {
+      id: e.id,
+      projectId: e.projectId, projectName: p ? p.name : '(deleted project)',
+      startMs: e.startMs, endMs: e.endMs,
+      durationMs: entryDuration(e)
+    };
+  });
+  const longest = getLongestEntryForDate(day);
+  const topProject = projectTotals[0] || null;
+  const dominantPercent = totalTrackedMs > 0 && topProject
+    ? Math.round((topProject.ms / totalTrackedMs) * 100)
+    : 0;
+  const entryCount = state.entries.filter(e => e.endMs > start && e.startMs < end).length;
+
+  const summaryText = buildDailyCloseoutSummaryText({
+    totalTrackedMs, projectTotals,
+    completedTasksCount: completedTasks.length,
+    incompleteTasksCount: incompleteTasks.length,
+    missingNotesCount: missingNoteEntries.length,
+    topProject, dominantPercent
+  });
+  const coachCard = getDailyCoachCard({
+    totalTrackedMs,
+    entryCount,
+    completedTasksCount: completedTasks.length,
+    carryForwardCount: incompleteTasks.length,
+    missingNotesCount: missingNoteEntries.length,
+    dominantProjectPercent: dominantPercent
+  });
+
+  return {
+    date: start,
+    builtAt: Date.now(),
+    observedEnd,
+    totalTrackedMs,
+    projectTotals,
+    completedTasks,
+    incompleteTasks,
+    missingNoteEntries,
+    longestEntry: longest ? { id: longest.entry.id, durationMs: longest.durationMs } : null,
+    topProjectId: topProject ? topProject.projectId : null,
+    topProjectName: topProject ? topProject.name : null,
+    dominantPercent,
+    entryCount,
+    summaryText,
+    coachCard,
+    timerRunning: !!state.activeTimer,
+    activeTimer: state.activeTimer ? {
+      projectId: state.activeTimer.projectId,
+      taskId: state.activeTimer.taskId,
+      startMs: state.activeTimer.startMs
+    } : null
+  };
+}
+
+// Rule-based daily summary line. Pure string composition; no AI required.
+// Reusable for AI prompt headers later.
+function buildDailyCloseoutSummaryText(parts){
+  const { totalTrackedMs, projectTotals, completedTasksCount,
+          incompleteTasksCount, missingNotesCount, topProject } = parts;
+  if(totalTrackedMs === 0 && completedTasksCount === 0){
+    return 'No tracked time and no completed tasks today.';
+  }
+  const bits = [];
+  bits.push(`You tracked ${formatHM(totalTrackedMs)} today across ${projectTotals.length} project${projectTotals.length === 1 ? '' : 's'}.`);
+  if(topProject && projectTotals.length > 1){
+    bits.push(`Most of your time went to ${topProject.name}.`);
+  }
+  if(completedTasksCount > 0 || incompleteTasksCount > 0){
+    bits.push(`You completed ${completedTasksCount} task${completedTasksCount === 1 ? '' : 's'}` +
+      (incompleteTasksCount > 0
+        ? ` and have ${incompleteTasksCount} active task${incompleteTasksCount === 1 ? '' : 's'} to carry forward.`
+        : '.'));
+  }
+  if(missingNotesCount > 0){
+    bits.push(`${missingNotesCount} ${missingNotesCount === 1 ? 'entry is' : 'entries are'} missing notes.`);
+  }
+  return bits.join(' ');
+}
+
+// Apply user selections from the End Day modal. Mutates: stops timer if
+// requested, applies per-task actions, appends a dailyCloseout record.
+// selections = {
+//   stopActiveTimer: boolean,
+//   taskActions: { [taskId]: 'carry' | 'keep' | 'complete' | 'archive' }
+// }
+function commitDailyCloseout(preview, selections){
+  const now = Date.now();
+  const sel = selections || {};
+  const actions = sel.taskActions || {};
+
+  if(sel.stopActiveTimer && state.activeTimer){
+    stopTimer(); // writes entry, clears activeTimer, saves
+  }
+
+  const carriedForwardTaskIds = [];
+  const completedDuringCloseoutIds = [];
+  const archivedDuringCloseoutIds = [];
+  const tomorrowStart = startOfDay(now) + 86400000;
+
+  for(const inc of preview.incompleteTasks){
+    const action = actions[inc.id] || inc.defaultAction;
+    const t = getTask(inc.id);
+    if(!t) continue;
+    if(action === 'carry'){
+      t.dueDate = tomorrowStart;
+      t.carryForwardCount = (t.carryForwardCount || 0) + 1;
+      t.lastCarriedForwardAt = now;
+      t.updatedAt = now;
+      // If carrying an overdue/due-today task, nudge priority up.
+      if((inc.isOverdue || inc.isDueToday) && t.priority !== 'high'){
+        t.priority = 'high';
+      }
+      carriedForwardTaskIds.push(t.id);
+    } else if(action === 'complete'){
+      t.completed = true;
+      t.status = 'completed';
+      t.completedAt = now;
+      t.updatedAt = now;
+      completedDuringCloseoutIds.push(t.id);
+    } else if(action === 'archive'){
+      t.status = 'archived';
+      t.archivedAt = now;
+      t.updatedAt = now;
+      archivedDuringCloseoutIds.push(t.id);
+    }
+    // 'keep' = no change
+  }
+
+  // Re-snapshot completed tasks AFTER the closeout actions, so tasks the user
+  // marked complete from the modal are included in the history record.
+  const allCompletedIds = [
+    ...preview.completedTasks.map(t => t.id),
+    ...completedDuringCloseoutIds
+  ];
+
+  const record = {
+    id: nextId('cl'),
+    date: preview.date,
+    closedAt: now,
+    totalTrackedMinutes: Math.round(preview.totalTrackedMs / 60000),
+    projectTotals: preview.projectTotals.map(p => ({
+      projectId: p.projectId, name: p.name, minutes: Math.round(p.ms / 60000)
+    })),
+    completedTaskIds: allCompletedIds,
+    completedTaskSnapshots: allCompletedIds.map(id => {
+      const t = getTask(id);
+      const p = t ? getProject(taskPrimaryProject(t)) : null;
+      return t ? { id: t.id, name: t.name, projectName: p ? p.name : null } : { id, name: '(deleted)' };
+    }),
+    carriedForwardTaskIds,
+    archivedTaskIds: archivedDuringCloseoutIds,
+    incompleteTaskIds: preview.incompleteTasks
+      .filter(t => (actions[t.id] || t.defaultAction) === 'keep')
+      .map(t => t.id),
+    missingNoteEntryIds: preview.missingNoteEntries.map(e => e.id),
+    summaryText: preview.summaryText,
+    coachCardText: preview.coachCard ? preview.coachCard.text : null,
+    coachCardCategory: preview.coachCard ? preview.coachCard.category : null,
+    topProjectId: preview.topProjectId,
+    topProjectName: preview.topProjectName,
+    entryCount: preview.entryCount,
+    longestEntryId: preview.longestEntry ? preview.longestEntry.id : null,
+    longestEntryMs: preview.longestEntry ? preview.longestEntry.durationMs : null,
+    createdAt: now
+  };
+  state.dailyCloseouts.push(record);
+  save();
+  return record;
+}
+
+// ============================================================
+// PRODUCTIVITY — Nudge Service
+// ------------------------------------------------------------
+// One scheduler tick checks all enabled nudges. Triggering is gated by:
+// global pause, presentation mode, working hours (unless overridden),
+// the nudge's own activeDays/activeStart/activeEnd window, snoozeUntil,
+// and intervalMinutes since lastTriggeredAt. Triggers create a nudgeEvent
+// in 'triggered' state; user responses transition it to done/snoozed/skipped.
+// If the app isn't visible when a nudge fires, it queues until visible.
+// ============================================================
+
+// In-renderer state (deliberately not persisted).
+let nudgeTickInterval = null;
+let pendingNudgeQueue = [];   // [{ eventId, nudgeId }] — most recent at end
+let currentNudgePopup = null; // { eventId, nudgeId } while a popup is showing
+let lastInteractionMs = Date.now();
+let nudgeInteractionListenersAttached = false;
+
+function attachNudgeInteractionListeners(){
+  if(nudgeInteractionListenersAttached) return;
+  nudgeInteractionListenersAttached = true;
+  const bump = () => { lastInteractionMs = Date.now(); };
+  // Passive listeners, no throttle needed — these handlers do trivial work.
+  document.addEventListener('mousemove', bump, { passive: true });
+  document.addEventListener('keydown', bump, { passive: true });
+  document.addEventListener('visibilitychange', () => {
+    if(document.visibilityState === 'visible'){
+      bump();
+      flushPendingNudgeQueue();
+    }
+  });
+}
+
+function userIsActive(){
+  if(state.activeTimer) return true;
+  return Date.now() - lastInteractionMs < 5 * 60 * 1000;
+}
+
+function nudgesGloballyPaused(){
+  const p = state.settings.productivity || {};
+  if(p.presentationModeEnabled) return true;
+  if(p.nudgePauseUntil && p.nudgePauseUntil > Date.now()) return true;
+  return false;
+}
+
+function isWithinWorkingHours(nowMs){
+  const p = (state.settings.productivity || {}).workingHours || {};
+  const now = new Date(nowMs);
+  const day = now.getDay();
+  const days = Array.isArray(p.days) ? p.days : [1,2,3,4,5];
+  if(!days.includes(day)) return false;
+  const [sh, sm] = (p.start || '09:00').split(':').map(Number);
+  const [eh, em] = (p.end   || '17:00').split(':').map(Number);
+  const mins = now.getHours() * 60 + now.getMinutes();
+  return mins >= sh*60 + sm && mins < eh*60 + em;
+}
+
+function isWithinNudgeWindow(nudge, nowMs){
+  const now = new Date(nowMs);
+  const day = now.getDay();
+  if(!nudge.activeDays.includes(day)) return false;
+  const [sh, sm] = (nudge.activeStartTime || '09:00').split(':').map(Number);
+  const [eh, em] = (nudge.activeEndTime   || '17:00').split(':').map(Number);
+  const mins = now.getHours() * 60 + now.getMinutes();
+  return mins >= sh*60 + sm && mins < eh*60 + em;
+}
+
+// Decision function. Returns { fire: bool, reason: string } so logging can
+// explain why a nudge didn't fire — useful when debugging in the future.
+function shouldNudgeFire(nudge, nowMs){
+  if(!nudge.enabled) return { fire:false, reason:'disabled' };
+  if(nudge.archivedAt) return { fire:false, reason:'archived' };
+  if(nudgesGloballyPaused()) return { fire:false, reason:'globally-paused' };
+  if(nudge.snoozeUntil && nudge.snoozeUntil > nowMs) return { fire:false, reason:'snoozed' };
+  if(!isWithinNudgeWindow(nudge, nowMs)) return { fire:false, reason:'outside-nudge-window' };
+  if(nudge.respectWorkingHours && !isWithinWorkingHours(nowMs)){
+    if(!(nudge.allowWhenActiveOutsideHours && userIsActive())){
+      return { fire:false, reason:'outside-working-hours' };
+    }
+  }
+  const last = nudge.lastTriggeredAt || 0;
+  const elapsed = nowMs - last;
+  if(elapsed < nudge.intervalMinutes * 60 * 1000) return { fire:false, reason:'interval-not-elapsed' };
+  return { fire:true, reason:'ok' };
+}
+
+// Create the persisted 'triggered' event. Snapshots the active context so a
+// future report can correlate nudge timing with what the user was doing.
+function createNudgeTriggerEvent(nudge){
+  const now = Date.now();
+  const ev = {
+    id: nextId('ne'),
+    nudgeId: nudge.id,
+    triggeredAt: now,
+    response: 'triggered',   // transitions to done/snoozed/skipped/missed
+    respondedAt: null,
+    snoozeUntil: null,
+    snoozeMinutes: null,
+    timedDurationMinutes: nudge.timedDurationMinutes || null,
+    activeProjectId: state.activeTimer ? state.activeTimer.projectId : null,
+    activeTaskId: state.activeTimer ? state.activeTimer.taskId : null,
+    activeEntryId: null,
+    wasTimerRunning: !!state.activeTimer,
+    wasOutsideWorkingHours: !isWithinWorkingHours(now),
+    createdAt: now
+  };
+  state.nudgeEvents.push(ev);
+  nudge.lastTriggeredAt = now;
+  save();
+  return ev;
+}
+
+// Push the nudge into the popup (or queue it if the app is hidden).
+function deliverNudge(nudge, event){
+  if(document.visibilityState !== 'visible' || currentNudgePopup){
+    pendingNudgeQueue.push({ eventId: event.id, nudgeId: nudge.id });
+    return;
+  }
+  showNudgePopup(nudge, event);
+}
+
+function flushPendingNudgeQueue(){
+  if(currentNudgePopup) return;
+  if(pendingNudgeQueue.length === 0) return;
+  const item = pendingNudgeQueue.pop(); // newest first
+  // Mark older queued items as missed and discard them — showing a stack of
+  // popups in sequence would be annoying.
+  for(const skipped of pendingNudgeQueue){
+    const ev = state.nudgeEvents.find(e => e.id === skipped.eventId);
+    if(ev && ev.response === 'triggered'){
+      ev.response = 'missed';
+      ev.respondedAt = Date.now();
+    }
+  }
+  pendingNudgeQueue = [];
+  const nudge = state.nudges.find(n => n.id === item.nudgeId);
+  const event = state.nudgeEvents.find(e => e.id === item.eventId);
+  if(nudge && event){
+    showNudgePopup(nudge, event);
+  } else {
+    save();
+  }
+}
+
+// Mutate a nudge event for the user's response. Returns nothing — caller
+// closes the popup.
+function recordNudgeResponse(eventId, response, extras){
+  const ev = state.nudgeEvents.find(e => e.id === eventId);
+  if(!ev) return;
+  ev.response = response;
+  ev.respondedAt = Date.now();
+  if(extras){
+    if(extras.snoozeUntil != null) ev.snoozeUntil = extras.snoozeUntil;
+    if(extras.snoozeMinutes != null) ev.snoozeMinutes = extras.snoozeMinutes;
+  }
+  save();
+}
+
+// The scheduler tick. Called every 60 seconds while the app is running.
+function nudgeTick(){
+  const now = Date.now();
+  for(const nudge of state.nudges){
+    const decision = shouldNudgeFire(nudge, now);
+    if(!decision.fire) continue;
+    const event = createNudgeTriggerEvent(nudge);
+    deliverNudge(nudge, event);
+    // Only fire one nudge per tick to avoid stacking popups. Others wait
+    // for the next 60-second tick.
+    break;
+  }
+}
+
+function startNudgeScheduler(){
+  if(nudgeTickInterval) return;
+  attachNudgeInteractionListeners();
+  nudgeTickInterval = setInterval(nudgeTick, 60 * 1000);
+}
+
+function stopNudgeScheduler(){
+  if(nudgeTickInterval) clearInterval(nudgeTickInterval);
+  nudgeTickInterval = null;
+}
+
+// ----- Mental break preset (auto-seed) -----
+
+// Called once at init. If the user has never had the preset seeded, drop in a
+// disabled Mental Break nudge so it's discoverable in Settings without
+// triggering until the user opts in.
+function maybeSeedMentalBreakNudge(){
+  const p = state.settings.productivity;
+  if(p.mentalBreakSeeded) return;
+  const exists = state.nudges.some(n => n.id === 'nudge_mentalbreak');
+  if(!exists){
+    state.nudges.push(normalizeNudgeShape({
+      id: 'nudge_mentalbreak',
+      name: 'Mental break',
+      message: 'Take a short reset before continuing.',
+      category: 'Break',
+      intervalMinutes: 120,
+      activeDays: [1,2,3,4,5],
+      activeStartTime: '09:00',
+      activeEndTime: '17:00',
+      defaultSnoozeMinutes: 15,
+      enabled: false,
+      respectWorkingHours: true,
+      allowWhenActiveOutsideHours: true,
+      timedDurationMinutes: 5,
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    }));
+  }
+  p.mentalBreakSeeded = true;
+  save();
+}
+
+// ============================================================
+// PRODUCTIVITY — End-of-block divider
+// ============================================================
+
 // ------------------------------------------------------------
 // Insights tab
 // ------------------------------------------------------------
@@ -2273,6 +2903,7 @@ function renderInsights(){
   renderInsightsTaskList('insightsCompletedTasks', data.completedTasks, 'completed');
   renderInsightsTaskList('insightsInFlight', data.incompleteWithTime, 'in-flight');
   renderInsightsCarryForward(data.carryForward);
+  renderInsightsCloseouts();
   renderInsightsQuality(data, range);
 }
 
@@ -2500,6 +3131,503 @@ function renderInsightsQuality(data, range){
   wrap.innerHTML = flags.map(f => `<div class="quality-flag tone-${esc(f.tone)}">${esc(f.label)}</div>`).join('');
 }
 
+// ============================================================
+// PRODUCTIVITY — UI: Nudges (popup + settings manager)
+// ============================================================
+
+const NUDGE_CATEGORIES = ['Health','Focus','Admin','Planning','Break','Custom'];
+const DAY_NAMES = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+// ----- Popup -----
+
+function showNudgePopup(nudge, event){
+  currentNudgePopup = { eventId: event.id, nudgeId: nudge.id };
+  const modal = document.getElementById('nudgeModal');
+  document.getElementById('nudgeModalName').textContent = nudge.name;
+  document.getElementById('nudgeModalCategory').textContent = nudge.category;
+  document.getElementById('nudgeModalMessage').textContent = nudge.message || '';
+  const timedRow = document.getElementById('nudgeModalTimedRow');
+  const timedVal = document.getElementById('nudgeModalTimedValue');
+  if(nudge.timedDurationMinutes){
+    timedRow.classList.remove('hidden');
+    timedVal.textContent = `${nudge.timedDurationMinutes} min`;
+  } else {
+    timedRow.classList.add('hidden');
+  }
+  // Snooze button label reflects the per-nudge configured snooze.
+  document.getElementById('btnNudgeSnooze').textContent =
+    `Snooze ${nudge.defaultSnoozeMinutes} min`;
+  openModal('nudgeModal');
+}
+
+function closeNudgePopup(){
+  currentNudgePopup = null;
+  closeModal('nudgeModal');
+  // Drain queue after the user clears the current popup.
+  setTimeout(flushPendingNudgeQueue, 50);
+}
+
+function handleNudgeDone(){
+  if(!currentNudgePopup) return;
+  recordNudgeResponse(currentNudgePopup.eventId, 'done');
+  toast('Logged');
+  closeNudgePopup();
+}
+
+function handleNudgeSnooze(){
+  if(!currentNudgePopup) return;
+  const nudge = state.nudges.find(n => n.id === currentNudgePopup.nudgeId);
+  if(!nudge){ closeNudgePopup(); return; }
+  const mins = nudge.defaultSnoozeMinutes || 15;
+  const until = Date.now() + mins * 60 * 1000;
+  nudge.snoozeUntil = until;
+  recordNudgeResponse(currentNudgePopup.eventId, 'snoozed', { snoozeUntil: until, snoozeMinutes: mins });
+  toast(`Snoozed ${mins} min`);
+  closeNudgePopup();
+}
+
+function handleNudgeSkip(){
+  if(!currentNudgePopup) return;
+  recordNudgeResponse(currentNudgePopup.eventId, 'skipped');
+  closeNudgePopup();
+}
+
+// ----- Settings manager (list + add + edit + delete + pause + presentation) -----
+
+function renderNudgeManager(){
+  const wrap = document.getElementById('nudgesList');
+  if(!wrap) return;
+  if(state.nudges.length === 0){
+    wrap.innerHTML = '<div class="empty" style="padding:14px">No nudges yet. Click "+ New nudge" to add one.</div>';
+  } else {
+    wrap.innerHTML = state.nudges.map(n => {
+      const last = n.lastTriggeredAt ? new Date(n.lastTriggeredAt).toLocaleString() : 'never';
+      const snoozed = n.snoozeUntil && n.snoozeUntil > Date.now()
+        ? `<span class="nudge-row-snoozed">snoozed until ${new Date(n.snoozeUntil).toLocaleTimeString()}</span>`
+        : '';
+      return `
+        <div class="nudge-row${n.enabled ? '' : ' disabled'}">
+          <label class="nudge-row-toggle">
+            <input type="checkbox" data-nudge-toggle="${esc(n.id)}" ${n.enabled ? 'checked' : ''} />
+          </label>
+          <div class="nudge-row-main">
+            <div class="nudge-row-title">
+              <span class="nudge-row-name">${esc(n.name)}</span>
+              <span class="nudge-row-category cat-${esc(n.category.toLowerCase())}">${esc(n.category)}</span>
+              ${snoozed}
+            </div>
+            <div class="nudge-row-meta">
+              Every ${n.intervalMinutes} min · ${n.activeStartTime}–${n.activeEndTime} ·
+              ${n.activeDays.map(d => DAY_NAMES[d]).join(', ')}
+              ${n.timedDurationMinutes ? ` · ${n.timedDurationMinutes}m timed` : ''}
+              · last: ${last}
+            </div>
+          </div>
+          <div class="nudge-row-actions">
+            <button class="icon-btn" data-nudge-edit="${esc(n.id)}" title="Edit">✎</button>
+          </div>
+        </div>`;
+    }).join('');
+  }
+  wrap.querySelectorAll('[data-nudge-toggle]').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const n = state.nudges.find(x => x.id === cb.dataset.nudgeToggle);
+      if(!n) return;
+      n.enabled = cb.checked;
+      n.updatedAt = Date.now();
+      save();
+      renderNudgeManager();
+    });
+  });
+  wrap.querySelectorAll('[data-nudge-edit]').forEach(btn => {
+    btn.addEventListener('click', () => openNudgeModal(btn.dataset.nudgeEdit));
+  });
+  renderNudgePauseStatus();
+}
+
+// Tiny status line so the user always knows the global pause state.
+function renderNudgePauseStatus(){
+  const el = document.getElementById('nudgePauseStatus');
+  if(!el) return;
+  const p = state.settings.productivity || {};
+  if(p.presentationModeEnabled){
+    el.textContent = 'Presentation mode is ON — nudges suppressed.';
+    el.className = 'hint-text nudge-pause-status active';
+  } else if(p.nudgePauseUntil && p.nudgePauseUntil > Date.now()){
+    el.textContent = `Paused until ${new Date(p.nudgePauseUntil).toLocaleString()}.`;
+    el.className = 'hint-text nudge-pause-status active';
+  } else {
+    el.textContent = 'Nudges active.';
+    el.className = 'hint-text nudge-pause-status';
+  }
+  const presEl = document.getElementById('presentationToggle');
+  if(presEl) presEl.checked = !!p.presentationModeEnabled;
+}
+
+function pauseNudges(durationMs){
+  const p = state.settings.productivity || (state.settings.productivity = defaultProductivitySettings());
+  if(durationMs === 'tomorrow'){
+    const t = startOfDay(Date.now()) + 86400000;
+    p.nudgePauseUntil = t;
+  } else {
+    p.nudgePauseUntil = Date.now() + durationMs;
+  }
+  save();
+  renderNudgePauseStatus();
+  toast('Nudges paused');
+}
+
+function resumeNudges(){
+  const p = state.settings.productivity;
+  if(p) p.nudgePauseUntil = null;
+  save();
+  renderNudgePauseStatus();
+  toast('Nudges resumed');
+}
+
+function togglePresentationMode(){
+  const p = state.settings.productivity || (state.settings.productivity = defaultProductivitySettings());
+  p.presentationModeEnabled = !p.presentationModeEnabled;
+  save();
+  renderNudgePauseStatus();
+  toast(p.presentationModeEnabled ? 'Presentation mode ON' : 'Presentation mode OFF');
+}
+
+// ----- Edit modal -----
+
+let editingNudgeId = null;
+
+function openNudgeModal(nudgeId){
+  editingNudgeId = nudgeId || null;
+  const isEdit = !!nudgeId;
+  const n = isEdit ? state.nudges.find(x => x.id === nudgeId) : null;
+  document.getElementById('nudgeEditTitle').textContent = isEdit ? 'Edit nudge' : 'New nudge';
+  document.getElementById('nudgeEditName').value = n ? n.name : '';
+  document.getElementById('nudgeEditMessage').value = n ? n.message : '';
+  document.getElementById('nudgeEditInterval').value = n ? n.intervalMinutes : 60;
+  document.getElementById('nudgeEditStart').value = n ? n.activeStartTime : '09:00';
+  document.getElementById('nudgeEditEnd').value = n ? n.activeEndTime : '17:00';
+  document.getElementById('nudgeEditSnooze').value = n ? n.defaultSnoozeMinutes : 15;
+  document.getElementById('nudgeEditTimed').value = n && n.timedDurationMinutes != null ? n.timedDurationMinutes : '';
+  document.getElementById('nudgeEditEnabled').checked = n ? n.enabled : true;
+  document.getElementById('nudgeEditRespectHours').checked = n ? n.respectWorkingHours : true;
+  document.getElementById('nudgeEditAllowOutside').checked = n ? !!n.allowWhenActiveOutsideHours : false;
+
+  const catSel = document.getElementById('nudgeEditCategory');
+  catSel.innerHTML = NUDGE_CATEGORIES.map(c =>
+    `<option value="${esc(c)}"${n && n.category === c ? ' selected' : ''}>${esc(c)}</option>`
+  ).join('');
+
+  const daysWrap = document.getElementById('nudgeEditDays');
+  const days = n ? n.activeDays : [1,2,3,4,5];
+  daysWrap.innerHTML = DAY_NAMES.map((d, idx) => `
+    <label class="nudge-day-chip${days.includes(idx) ? ' selected' : ''}">
+      <input type="checkbox" data-nudge-day="${idx}" ${days.includes(idx) ? 'checked' : ''} />
+      <span>${d}</span>
+    </label>`).join('');
+  daysWrap.querySelectorAll('input[data-nudge-day]').forEach(cb => {
+    cb.addEventListener('change', () => {
+      cb.closest('.nudge-day-chip').classList.toggle('selected', cb.checked);
+    });
+  });
+
+  document.getElementById('btnDeleteNudge').style.display = isEdit ? '' : 'none';
+  openModal('nudgeEditModal');
+  setTimeout(() => document.getElementById('nudgeEditName').focus(), 50);
+}
+
+function saveNudgeFromModal(){
+  const name = document.getElementById('nudgeEditName').value.trim();
+  if(!name){ toast('Name required'); return; }
+  const message = document.getElementById('nudgeEditMessage').value.trim();
+  const intervalMinutes = Math.max(1, parseInt(document.getElementById('nudgeEditInterval').value, 10) || 60);
+  const activeStartTime = document.getElementById('nudgeEditStart').value || '09:00';
+  const activeEndTime = document.getElementById('nudgeEditEnd').value || '17:00';
+  const defaultSnoozeMinutes = Math.max(1, parseInt(document.getElementById('nudgeEditSnooze').value, 10) || 15);
+  const timedRaw = document.getElementById('nudgeEditTimed').value;
+  const timedDurationMinutes = timedRaw === '' ? null : Math.max(0, parseInt(timedRaw, 10) || 0) || null;
+  const enabled = document.getElementById('nudgeEditEnabled').checked;
+  const respectWorkingHours = document.getElementById('nudgeEditRespectHours').checked;
+  const allowWhenActiveOutsideHours = document.getElementById('nudgeEditAllowOutside').checked;
+  const category = document.getElementById('nudgeEditCategory').value;
+  const activeDays = [...document.querySelectorAll('#nudgeEditDays input[data-nudge-day]:checked')]
+    .map(cb => parseInt(cb.dataset.nudgeDay, 10));
+  if(activeDays.length === 0){ toast('Pick at least one day'); return; }
+
+  const now = Date.now();
+  if(editingNudgeId){
+    const n = state.nudges.find(x => x.id === editingNudgeId);
+    if(!n) return;
+    Object.assign(n, {
+      name, message, category, intervalMinutes,
+      activeDays, activeStartTime, activeEndTime,
+      defaultSnoozeMinutes, timedDurationMinutes,
+      enabled, respectWorkingHours, allowWhenActiveOutsideHours,
+      updatedAt: now
+    });
+  } else {
+    state.nudges.push(normalizeNudgeShape({
+      id: nextId('n'),
+      name, message, category, intervalMinutes,
+      activeDays, activeStartTime, activeEndTime,
+      defaultSnoozeMinutes, timedDurationMinutes,
+      enabled, respectWorkingHours, allowWhenActiveOutsideHours,
+      createdAt: now, updatedAt: now
+    }));
+  }
+  save();
+  closeModal('nudgeEditModal');
+  editingNudgeId = null;
+  renderNudgeManager();
+}
+
+function deleteNudgeFromModal(){
+  if(!editingNudgeId) return;
+  if(!confirm('Delete this nudge? Its history of events will stay in your data for reporting.')) return;
+  state.nudges = state.nudges.filter(n => n.id !== editingNudgeId);
+  save();
+  closeModal('nudgeEditModal');
+  editingNudgeId = null;
+  renderNudgeManager();
+}
+
+// ============================================================
+// PRODUCTIVITY — UI: End Day
+// ============================================================
+
+let currentClosePreview = null; // active preview while modal is open
+let currentCloseSelections = {}; // { taskId: 'carry'|'keep'|'complete'|'archive' }
+
+function openEndDayModal(){
+  currentClosePreview = buildDailyCloseoutPreview(Date.now());
+  // Seed selections with each task's defaultAction.
+  currentCloseSelections = {};
+  for(const inc of currentClosePreview.incompleteTasks){
+    currentCloseSelections[inc.id] = inc.defaultAction;
+  }
+  renderEndDayModal();
+  openModal('endDayModal');
+}
+
+function renderEndDayModal(){
+  const p = currentClosePreview;
+  if(!p) return;
+
+  // Header date
+  const dateEl = document.getElementById('endDayDate');
+  if(dateEl) dateEl.textContent = new Date(p.date).toLocaleDateString(undefined, { weekday:'long', month:'short', day:'numeric' });
+
+  // 1. Active timer warning
+  const timerWrap = document.getElementById('endDayTimerWrap');
+  if(p.timerRunning){
+    timerWrap.classList.remove('hidden');
+    const proj = p.activeTimer ? getProject(p.activeTimer.projectId) : null;
+    document.getElementById('endDayTimerInfo').textContent =
+      proj ? `Timer running on ${proj.name}.` : 'Timer running.';
+    document.getElementById('endDayStopTimerCheck').checked = true;
+  } else {
+    timerWrap.classList.add('hidden');
+  }
+
+  // 2. Summary text + coach card
+  document.getElementById('endDaySummary').textContent = p.summaryText;
+  const coach = document.getElementById('endDayCoach');
+  if(p.coachCard){
+    coach.classList.remove('hidden');
+    coach.querySelector('.coach-card-text').textContent = p.coachCard.text;
+  } else {
+    coach.classList.add('hidden');
+  }
+
+  // KPI strip
+  document.getElementById('endDayKpis').innerHTML = `
+    <div class="kpi-tile"><div class="kpi-value">${formatHM(p.totalTrackedMs)}</div><div class="kpi-label">Tracked</div></div>
+    <div class="kpi-tile"><div class="kpi-value">${p.completedTasks.length}</div><div class="kpi-label">Tasks done</div></div>
+    <div class="kpi-tile"><div class="kpi-value">${p.incompleteTasks.length}</div><div class="kpi-label">To carry</div></div>
+    <div class="kpi-tile${p.missingNoteEntries.length > 0 ? ' tone-warn' : ''}"><div class="kpi-value">${p.missingNoteEntries.length}</div><div class="kpi-label">Missing notes</div></div>
+    <div class="kpi-tile"><div class="kpi-value">${p.entryCount}</div><div class="kpi-label">Entries</div></div>
+  `;
+
+  // Project totals
+  const ptWrap = document.getElementById('endDayProjectTotals');
+  if(p.projectTotals.length === 0){
+    ptWrap.innerHTML = '<div class="empty" style="padding:8px 0">No time logged today.</div>';
+  } else {
+    ptWrap.innerHTML = p.projectTotals.map(pt => `
+      <div class="end-day-project-row">
+        <span class="end-day-project-swatch" style="background:${esc(pt.color)}"></span>
+        <span class="end-day-project-name">${esc(pt.name)}</span>
+        <span class="end-day-project-time mono">${formatHM(pt.ms)}</span>
+      </div>`).join('');
+  }
+
+  // 3. Completed
+  const compWrap = document.getElementById('endDayCompleted');
+  if(p.completedTasks.length === 0){
+    compWrap.innerHTML = '<div class="insights-empty">Nothing marked complete today.</div>';
+  } else {
+    compWrap.innerHTML = p.completedTasks.map(t => `
+      <div class="insights-item">
+        <span class="insights-item-mark insights-mark-done">✓</span>
+        <div class="insights-item-main">
+          <div class="insights-item-name">${esc(t.name)}</div>
+          <div class="insights-item-sub">${esc(t.projectName)} · ${formatHM(t.loggedTodayMs)} today</div>
+        </div>
+      </div>`).join('');
+  }
+
+  // 4. Incomplete / carry-forward — interactive radio selectors per task.
+  const incWrap = document.getElementById('endDayIncomplete');
+  if(p.incompleteTasks.length === 0){
+    incWrap.innerHTML = '<div class="insights-empty">No open tasks need a decision.</div>';
+  } else {
+    incWrap.innerHTML = p.incompleteTasks.map(t => {
+      const dueLabel = t.dueDate ? formatDueDate(t.dueDate) : '';
+      const typeBadge = t.isOverdue
+        ? '<span class="plan-type-badge type-overdue">Overdue</span>'
+        : t.isDueToday ? '<span class="plan-type-badge type-due-today">Due today</span>'
+        : t.loggedTodayMs > 0 ? '<span class="plan-type-badge type-in-progress">In progress</span>' : '';
+      const carryHint = t.carryForwardCount > 0
+        ? `<span class="end-day-task-cf">↻ carried ${t.carryForwardCount}×</span>`
+        : '';
+      const action = currentCloseSelections[t.id] || t.defaultAction;
+      return `
+        <div class="end-day-task" data-task-id="${esc(t.id)}">
+          <div class="end-day-task-head">
+            <div class="end-day-task-info">
+              <div class="end-day-task-name">${esc(t.name)}</div>
+              <div class="end-day-task-meta">
+                ${typeBadge}
+                <span class="end-day-task-project">${esc(t.projectName)}</span>
+                ${dueLabel ? `<span>${esc(dueLabel)}</span>` : ''}
+                ${t.loggedTodayMs > 0 ? `<span>${formatHM(t.loggedTodayMs)} today</span>` : ''}
+                ${carryHint}
+              </div>
+            </div>
+          </div>
+          <div class="end-day-task-actions">
+            ${['carry','keep','complete','archive'].map(a => `
+              <label class="end-day-action${action === a ? ' selected' : ''}">
+                <input type="radio" name="endday-act-${esc(t.id)}" value="${a}" data-task-action="${esc(t.id)}" ${action === a ? 'checked' : ''} />
+                <span>${a === 'carry' ? 'Carry to tomorrow' : a === 'keep' ? 'Keep active' : a === 'complete' ? 'Mark complete' : 'Archive'}</span>
+              </label>`).join('')}
+          </div>
+        </div>`;
+    }).join('');
+
+    incWrap.querySelectorAll('input[data-task-action]').forEach(r => {
+      r.addEventListener('change', () => {
+        currentCloseSelections[r.dataset.taskAction] = r.value;
+        // Update visual highlight on the labels.
+        const card = r.closest('.end-day-task');
+        card.querySelectorAll('.end-day-action').forEach(l => l.classList.remove('selected'));
+        r.closest('.end-day-action').classList.add('selected');
+      });
+    });
+  }
+
+  // 5. Missing notes
+  const mnWrap = document.getElementById('endDayMissingNotes');
+  if(p.missingNoteEntries.length === 0){
+    mnWrap.innerHTML = '<div class="insights-empty">All entries have notes.</div>';
+    document.getElementById('endDayMissingShortcut').classList.add('hidden');
+  } else {
+    mnWrap.innerHTML = p.missingNoteEntries.slice(0, 6).map(e => `
+      <div class="insights-item">
+        <span class="insights-item-mark insights-mark-overdue">!</span>
+        <div class="insights-item-main">
+          <div class="insights-item-name">${esc(e.projectName)} — ${formatHM(e.durationMs)}</div>
+          <div class="insights-item-sub">${formatTimeOfDay(e.startMs)} → ${formatTimeOfDay(e.endMs)}</div>
+        </div>
+      </div>`).join('') +
+      (p.missingNoteEntries.length > 6
+        ? `<div class="insights-empty">…and ${p.missingNoteEntries.length - 6} more</div>` : '');
+    document.getElementById('endDayMissingShortcut').classList.remove('hidden');
+  }
+}
+
+function commitEndDayFromModal(){
+  if(!currentClosePreview) return;
+  const stopActiveTimer = currentClosePreview.timerRunning &&
+    document.getElementById('endDayStopTimerCheck').checked;
+  const selections = { stopActiveTimer, taskActions: { ...currentCloseSelections } };
+  // commitDailyCloseout calls stopTimer() which itself calls renderAll. We
+  // re-render Today's Plan and Insights afterwards to make sure carry-forward
+  // changes are visible.
+  commitDailyCloseout(currentClosePreview, selections);
+  closeModal('endDayModal');
+  currentClosePreview = null;
+  currentCloseSelections = {};
+  renderAll();
+  // Insights pane only rerenders when re-entered; force a refresh in case the
+  // user is sitting on Insights when they close out.
+  if(document.querySelector('.tab.active')?.dataset.tab === 'insights'){
+    renderInsights();
+  }
+  toast('Day closed out');
+}
+
+function jumpToMissingNotesLog(){
+  // Switch to Log tab with the missing-notes filter on.
+  logMissingNotesOnly = true;
+  logBillableFilter = 'all';
+  logProjectFilter = 'all';
+  logTaskFilter = 'all';
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+  document.querySelectorAll('.tab-pane').forEach(x => x.classList.remove('active'));
+  document.querySelector('.tab[data-tab="log"]').classList.add('active');
+  document.querySelector('.tab-pane[data-pane="log"]').classList.add('active');
+  // Match billable filter buttons UI state.
+  document.querySelectorAll('[data-log-filter]').forEach(x => {
+    x.classList.toggle('active', x.dataset.logFilter === 'all');
+  });
+  renderLog();
+  closeModal('endDayModal');
+}
+
+// ----- Insights: closeout history card -----
+
+function renderInsightsCloseouts(){
+  const wrap = document.getElementById('insightsCloseouts');
+  if(!wrap) return;
+  const history = getCloseoutHistory();
+  if(history.length === 0){
+    wrap.innerHTML = '<div class="insights-empty">No closeouts yet. Click End Day on the Today tab to capture one.</div>';
+    return;
+  }
+  const latest = history[0];
+  const dateStr = new Date(latest.date).toLocaleDateString(undefined, { weekday:'long', month:'short', day:'numeric' });
+  const minutesH = (latest.totalTrackedMinutes / 60).toFixed(1);
+  let html = `
+    <div class="closeout-latest">
+      <div class="closeout-latest-head">
+        <span class="closeout-latest-date">${esc(dateStr)}</span>
+        <span class="closeout-latest-time mono">${minutesH}h tracked · ${latest.entryCount} entries</span>
+      </div>
+      <div class="closeout-latest-summary">${esc(latest.summaryText)}</div>
+      ${latest.coachCardText ? `<div class="closeout-latest-coach">"${esc(latest.coachCardText)}"</div>` : ''}
+      <div class="closeout-latest-stats">
+        <span><strong>${latest.completedTaskIds.length}</strong> completed</span>
+        <span><strong>${latest.carriedForwardTaskIds.length}</strong> carried</span>
+        ${latest.archivedTaskIds && latest.archivedTaskIds.length > 0 ? `<span><strong>${latest.archivedTaskIds.length}</strong> archived</span>` : ''}
+        ${latest.missingNoteEntryIds.length > 0 ? `<span class="closeout-warn"><strong>${latest.missingNoteEntryIds.length}</strong> missing notes</span>` : ''}
+      </div>
+    </div>`;
+  if(history.length > 1){
+    html += '<div class="closeout-history-title">Recent closeouts</div><div class="closeout-history-list">';
+    for(const c of history.slice(1, 7)){
+      const d = new Date(c.date).toLocaleDateString();
+      html += `
+        <div class="closeout-history-row">
+          <span class="closeout-history-date">${esc(d)}</span>
+          <span class="closeout-history-stats">${(c.totalTrackedMinutes/60).toFixed(1)}h · ${c.completedTaskIds.length} done · ${c.carriedForwardTaskIds.length} carried</span>
+        </div>`;
+    }
+    html += '</div>';
+  }
+  wrap.innerHTML = html;
+}
+
 // ------------------------------------------------------------
 // Settings & Update checker
 // ------------------------------------------------------------
@@ -2513,10 +3641,43 @@ function applySettings(){
   document.getElementById('autodetectToggle').checked=!!s.autodetectEnabled;
   document.getElementById('webhookUrl').value=s.webhookUrl||'';
   document.getElementById('accountLabelInput').value=s.accountLabel||'Account';
+  applyProductivitySettings();
   window.punch.setAlwaysOnTop(!!s.alwaysOnTop);
   window.punch.setHotkey(s.hotkey);
   if(s.idleEnabled) window.punch.startIdlePoll(s.idleThresholdMin*60); else window.punch.stopIdlePoll();
   if(s.autodetectEnabled) window.punch.startAutodetect(); else window.punch.stopAutodetect();
+}
+
+// Reflect productivity settings into the Settings tab inputs. Pulled out of
+// applySettings so it can also be called independently after a save.
+function applyProductivitySettings(){
+  const p = state.settings.productivity || (state.settings.productivity = defaultProductivitySettings());
+  const wh = p.workingHours || (p.workingHours = { start:'09:00', end:'17:00', days:[1,2,3,4,5] });
+  const startEl = document.getElementById('workingHoursStart');
+  const endEl = document.getElementById('workingHoursEnd');
+  if(startEl) startEl.value = wh.start;
+  if(endEl) endEl.value = wh.end;
+  const daysWrap = document.getElementById('workingHoursDays');
+  if(daysWrap){
+    daysWrap.innerHTML = DAY_NAMES.map((d, idx) => `
+      <label class="nudge-day-chip${wh.days.includes(idx) ? ' selected' : ''}">
+        <input type="checkbox" data-wh-day="${idx}" ${wh.days.includes(idx) ? 'checked' : ''} />
+        <span>${d}</span>
+      </label>`).join('');
+    daysWrap.querySelectorAll('input[data-wh-day]').forEach(cb => {
+      cb.addEventListener('change', () => {
+        const day = parseInt(cb.dataset.whDay, 10);
+        const set = new Set(state.settings.productivity.workingHours.days);
+        if(cb.checked) set.add(day); else set.delete(day);
+        state.settings.productivity.workingHours.days = [...set].sort();
+        cb.closest('.nudge-day-chip').classList.toggle('selected', cb.checked);
+        save();
+      });
+    });
+  }
+  const pres = document.getElementById('presentationToggle');
+  if(pres) pres.checked = !!p.presentationModeEnabled;
+  renderNudgePauseStatus();
 }
 async function applyHotkey(){
   const accel=document.getElementById('hotkeyInput').value.trim(); if(!accel) return;
@@ -2846,12 +4007,55 @@ document.getElementById('btnDeleteAccount').addEventListener('click', deleteAcco
   document.getElementById('btnOpenLog').addEventListener('click',()=>window.punch.openLog());
   document.getElementById('btnWipe').addEventListener('click',wipeAll);
 
+  // ----- Productivity: nudges -----
+  document.getElementById('btnAddNudge').addEventListener('click', () => openNudgeModal(null));
+  document.getElementById('btnSaveNudge').addEventListener('click', saveNudgeFromModal);
+  document.getElementById('btnDeleteNudge').addEventListener('click', deleteNudgeFromModal);
+  document.getElementById('btnNudgeDone').addEventListener('click', handleNudgeDone);
+  document.getElementById('btnNudgeSnooze').addEventListener('click', handleNudgeSnooze);
+  document.getElementById('btnNudgeSkip').addEventListener('click', handleNudgeSkip);
+  document.querySelectorAll('[data-pause-nudges]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const v = btn.dataset.pauseNudges;
+      if(v === 'tomorrow') pauseNudges('tomorrow');
+      else pauseNudges(parseInt(v, 10) * 60 * 1000);
+    });
+  });
+  document.getElementById('btnResumeNudges').addEventListener('click', resumeNudges);
+  document.getElementById('presentationToggle').addEventListener('change', togglePresentationMode);
+
+  // Working hours inputs
+  document.getElementById('workingHoursStart').addEventListener('change', (e) => {
+    state.settings.productivity.workingHours.start = e.target.value || '09:00';
+    save();
+  });
+  document.getElementById('workingHoursEnd').addEventListener('change', (e) => {
+    state.settings.productivity.workingHours.end = e.target.value || '17:00';
+    save();
+  });
+
+  // ----- Productivity: End Day -----
+  document.getElementById('btnEndDay').addEventListener('click', openEndDayModal);
+  document.getElementById('btnCommitEndDay').addEventListener('click', commitEndDayFromModal);
+  document.getElementById('endDayMissingShortcut').addEventListener('click', jumpToMissingNotesLog);
+
   // Modal close
   document.querySelectorAll('.modal-overlay').forEach(o=>{
-    o.addEventListener('click',(e)=>{ if(e.target===o) closeModal(o.id); });
+    o.addEventListener('click',(e)=>{
+      if(e.target!==o) return;
+      // Nudge popup should not be dismissible by background click — force a
+      // response so events don't get stuck in the 'triggered' state.
+      if(o.id === 'nudgeModal') return;
+      closeModal(o.id);
+    });
   });
   document.querySelectorAll('[data-close]').forEach(b=>{
-    b.addEventListener('click',()=>closeModal(b.dataset.close));
+    b.addEventListener('click',()=>{
+      // If the user closes the nudge popup via the X (none in our markup
+      // currently, but defensive), treat as Skip.
+      if(b.dataset.close === 'nudgeModal'){ handleNudgeSkip(); return; }
+      closeModal(b.dataset.close);
+    });
   });
 
   // Keyboard
@@ -2859,7 +4063,11 @@ document.getElementById('btnDeleteAccount').addEventListener('click', deleteAcco
     const tag=(e.target.tagName||'').toLowerCase();
     const inField=tag==='input'||tag==='textarea'||tag==='select';
     const modal=document.querySelector('.modal-overlay.open');
-    if(e.key==='Escape'&&modal){ closeModal(modal.id); return; }
+    if(e.key==='Escape'&&modal){
+      // Nudge popup must record a response — Esc skips.
+      if(modal.id === 'nudgeModal'){ handleNudgeSkip(); return; }
+      closeModal(modal.id); return;
+    }
     if(inField||modal) return;
     if(e.code==='Space'){ e.preventDefault(); toggleTimer(); }
   });
@@ -2960,6 +4168,42 @@ function updateMiniTimer() {
 // What's New Modal
 // ------------------------------------------------------------
 const WHATS_NEW_CONTENT = {
+  '1.5.0': `
+    <h3>🎯 Nudges &amp; breaks</h3>
+    <ul>
+      <li>New in-app prompts that fire on an interval while you're working — Drink water, Stand up, Stretch, Mental break, anything you want</li>
+      <li>Manage them in <strong>Settings → Nudges &amp; breaks</strong>: name, message, category, interval, active days/hours, snooze duration, optional timed-break duration</li>
+      <li>Each nudge popup lets you log <strong>Done</strong>, <strong>Snooze</strong>, or <strong>Skip</strong> — every response is logged for future reporting</li>
+      <li>Global pause controls: 30 min, 1 hr, until tomorrow, or full <strong>Presentation mode</strong> to suppress nudges during screen sharing</li>
+      <li><strong>Mental break</strong> preset is seeded disabled — toggle it on if you want a periodic reset reminder</li>
+      <li>Nudges respect a configurable working-hours window, with an opt-in to still fire when you're actively working outside hours</li>
+    </ul>
+
+    <h3>📅 End Day closeout</h3>
+    <ul>
+      <li>New <strong>End Day</strong> button on the Today tab — generates a daily summary you can review in under 2 minutes</li>
+      <li>Stops a running timer (if any), shows project totals, completed tasks, open tasks, and entries missing notes</li>
+      <li>Per-task decisions: <strong>Carry to tomorrow</strong>, <strong>Keep active</strong>, <strong>Mark complete</strong>, or <strong>Archive</strong></li>
+      <li>Carry-forward updates the existing task (no duplicates) and tracks how many times each task has slipped</li>
+      <li>Daily coach card surfaces a short, rule-based prompt — drag reduction, context cleanup, momentum, etc. No quotes, no AI.</li>
+      <li>Closeout history appears in Insights, with the latest summary up top and recent days below</li>
+    </ul>
+
+    <h3>↻ Automatic carry-forward</h3>
+    <ul>
+      <li>Overdue active tasks now auto-migrate to today's plan on app open — you don't have to press End Day to keep things moving</li>
+      <li>Idempotent: opening the app multiple times the same day won't double-bump anything</li>
+      <li>End Day still works for explicit "carry to tomorrow" decisions and getting a summary</li>
+    </ul>
+
+    <h3>🔧 Under the hood</h3>
+    <ul>
+      <li>Storage schema bumped to v2 — adds <code>nudges</code>, <code>nudgeEvents</code>, <code>dailyCloseouts</code> collections and a productivity-settings namespace. Existing data auto-upgrades on load.</li>
+      <li>Tasks gain <code>carryForwardCount</code> and <code>lastCarriedForwardAt</code> — both reflect on the task card and the End Day modal</li>
+      <li>End Day logic is split into a pure preview and a separate commit step, so future Focus dashboards and AI summaries can reuse the same data without rewriting anything</li>
+    </ul>
+  `,
+
   '1.4.6': `
     <h3>🐛 Ghost timer window now actually appears in the taskbar</h3>
     <ul>

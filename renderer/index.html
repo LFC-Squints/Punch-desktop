@@ -93,10 +93,13 @@
 
     <!-- TODAY -->
     <div class="tab-pane active" data-pane="today">
-      <div class="totals">
-        <div class="total-cell"><div class="total-label">Today</div><div id="totalToday" class="total-value">0:00</div></div>
-        <div class="total-cell"><div class="total-label">This week</div><div id="totalWeek" class="total-value">0:00</div></div>
-        <div class="total-cell"><div class="total-label">Last 30 days</div><div id="totalMonth" class="total-value">0:00</div></div>
+      <div class="totals-row">
+        <div class="totals">
+          <div class="total-cell"><div class="total-label">Today</div><div id="totalToday" class="total-value">0:00</div></div>
+          <div class="total-cell"><div class="total-label">This week</div><div id="totalWeek" class="total-value">0:00</div></div>
+          <div class="total-cell"><div class="total-label">Last 30 days</div><div id="totalMonth" class="total-value">0:00</div></div>
+        </div>
+        <button class="btn end-day-btn" id="btnEndDay" title="Generate a closeout summary for today">End Day</button>
       </div>
       <div id="todaysPlan" class="todays-plan"></div>
       <div class="entries-toolbar">
@@ -220,6 +223,10 @@
         <div class="insights-card-title">Carry forward <span class="hint-inline">— overdue + due in next 7 days</span></div>
         <div id="insightsCarryForward" class="insights-list"></div>
       </div>
+      <div class="insights-card">
+        <div class="insights-card-title">Daily closeouts <span class="hint-inline">— most recent first</span></div>
+        <div id="insightsCloseouts" class="closeouts-wrap"></div>
+      </div>
       <div class="insights-card insights-quality">
         <div class="insights-card-title">Quality</div>
         <div id="insightsQuality"></div>
@@ -309,6 +316,46 @@
       <div class="settings-section">
         <div class="settings-title">Always on top</div>
         <label class="checkbox"><input type="checkbox" id="aotToggle" checked /><span>Pin the widget above other windows</span></label>
+      </div>
+
+      <!-- NUDGES -->
+      <div class="settings-section">
+        <div class="settings-title">Nudges &amp; breaks</div>
+        <div class="hint-text" style="margin-bottom:10px">
+          Lightweight in-app prompts that fire on an interval while you're working.
+          Tip: the Mental break preset is seeded disabled — toggle it on below if you want a periodic reset reminder, or delete it from the list.
+        </div>
+
+        <div class="nudge-controls-row">
+          <button class="btn" data-pause-nudges="30">Pause 30 min</button>
+          <button class="btn" data-pause-nudges="60">Pause 1 hr</button>
+          <button class="btn" data-pause-nudges="tomorrow">Pause until tomorrow</button>
+          <button class="btn" id="btnResumeNudges">Resume</button>
+          <label class="checkbox" style="margin-left:auto">
+            <input type="checkbox" id="presentationToggle" /><span>Presentation mode</span>
+          </label>
+        </div>
+        <div id="nudgePauseStatus" class="hint-text nudge-pause-status"></div>
+
+        <div id="nudgesList" class="nudges-list" style="margin-top:10px"></div>
+
+        <div class="field-inline" style="margin-top:10px">
+          <button class="btn btn-primary" id="btnAddNudge">+ New nudge</button>
+        </div>
+
+        <div class="settings-subtitle" style="margin-top:14px">Working hours</div>
+        <div class="hint-text" style="margin-bottom:8px">Used as the default window for nudges that respect working hours.</div>
+        <div class="field-inline" style="gap:10px;flex-wrap:wrap">
+          <label class="field-inline" style="gap:6px">
+            <span class="field-label">Start</span>
+            <input id="workingHoursStart" type="time" />
+          </label>
+          <label class="field-inline" style="gap:6px">
+            <span class="field-label">End</span>
+            <input id="workingHoursEnd" type="time" />
+          </label>
+          <div class="nudge-days-row" id="workingHoursDays"></div>
+        </div>
       </div>
 
       <div class="settings-section">
@@ -554,6 +601,138 @@
       <div class="modal-actions">
         <button id="subcatCancel" class="btn">Cancel</button>
         <button id="subcatConfirm" class="btn btn-primary">Add</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Nudge popup -->
+  <div id="nudgeModal" class="modal-overlay">
+    <div class="modal nudge-popup">
+      <div class="nudge-popup-head">
+        <span class="nudge-popup-badge" id="nudgeModalCategory">Custom</span>
+        <span class="nudge-popup-name" id="nudgeModalName">Nudge</span>
+      </div>
+      <div class="nudge-popup-message" id="nudgeModalMessage"></div>
+      <div class="nudge-popup-timed hidden" id="nudgeModalTimedRow">
+        Suggested duration: <span id="nudgeModalTimedValue" class="mono"></span>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" id="btnNudgeSkip">Skip</button>
+        <button class="btn" id="btnNudgeSnooze">Snooze</button>
+        <button class="btn btn-primary" id="btnNudgeDone">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Nudge edit modal -->
+  <div id="nudgeEditModal" class="modal-overlay">
+    <div class="modal">
+      <div class="modal-title" id="nudgeEditTitle">New nudge</div>
+      <div class="field">
+        <label class="field-label">Name</label>
+        <input id="nudgeEditName" type="text" placeholder="e.g. Drink water" maxlength="80" />
+      </div>
+      <div class="field">
+        <label class="field-label">Message</label>
+        <textarea id="nudgeEditMessage" placeholder="The prompt that appears in the popup" rows="2" style="width:100%;resize:vertical"></textarea>
+      </div>
+      <div class="row-2">
+        <div class="field">
+          <label class="field-label">Category</label>
+          <select id="nudgeEditCategory" class="punch-select"></select>
+        </div>
+        <div class="field">
+          <label class="field-label">Every (min)</label>
+          <input id="nudgeEditInterval" type="number" min="1" max="1440" step="1" />
+        </div>
+      </div>
+      <div class="row-2">
+        <div class="field">
+          <label class="field-label">Active from</label>
+          <input id="nudgeEditStart" type="time" />
+        </div>
+        <div class="field">
+          <label class="field-label">Active until</label>
+          <input id="nudgeEditEnd" type="time" />
+        </div>
+      </div>
+      <div class="field">
+        <label class="field-label">Active days</label>
+        <div id="nudgeEditDays" class="nudge-days-row"></div>
+      </div>
+      <div class="row-2">
+        <div class="field">
+          <label class="field-label">Snooze (min)</label>
+          <input id="nudgeEditSnooze" type="number" min="1" max="240" step="1" />
+        </div>
+        <div class="field">
+          <label class="field-label">Timed duration (min) <span class="hint-inline">— optional</span></label>
+          <input id="nudgeEditTimed" type="number" min="0" max="120" step="1" placeholder="e.g. 5" />
+        </div>
+      </div>
+      <div class="field">
+        <label class="checkbox"><input type="checkbox" id="nudgeEditEnabled" checked /><span>Enabled</span></label>
+        <label class="checkbox"><input type="checkbox" id="nudgeEditRespectHours" checked /><span>Respect working hours</span></label>
+        <label class="checkbox"><input type="checkbox" id="nudgeEditAllowOutside" /><span>Allow when actively working outside hours</span></label>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-danger" id="btnDeleteNudge" style="margin-right:auto">Delete</button>
+        <button class="btn" data-close="nudgeEditModal">Cancel</button>
+        <button class="btn btn-primary" id="btnSaveNudge">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- End Day modal -->
+  <div id="endDayModal" class="modal-overlay">
+    <div class="modal end-day-modal">
+      <div class="end-day-header">
+        <div>
+          <div class="modal-title" style="margin:0">End Day</div>
+          <div id="endDayDate" class="end-day-date"></div>
+        </div>
+        <button class="tb-btn" data-close="endDayModal" title="Close"><svg viewBox="0 0 16 16" width="14" height="14"><line x1="4" y1="4" x2="12" y2="12" stroke="currentColor" stroke-width="1.4"/><line x1="12" y1="4" x2="4" y2="12" stroke="currentColor" stroke-width="1.4"/></svg></button>
+      </div>
+
+      <div id="endDayTimerWrap" class="end-day-timer-wrap hidden">
+        <div class="end-day-timer-info" id="endDayTimerInfo"></div>
+        <label class="checkbox"><input type="checkbox" id="endDayStopTimerCheck" checked /><span>Stop the timer and log the entry</span></label>
+      </div>
+
+      <div class="end-day-section">
+        <div class="end-day-section-title">Summary</div>
+        <div id="endDaySummary" class="end-day-summary"></div>
+        <div id="endDayKpis" class="end-day-kpis"></div>
+        <div id="endDayCoach" class="coach-card hidden">
+          <span class="coach-card-mark">✦</span>
+          <span class="coach-card-text"></span>
+        </div>
+      </div>
+
+      <div class="end-day-section">
+        <div class="end-day-section-title">Project totals</div>
+        <div id="endDayProjectTotals" class="end-day-project-totals"></div>
+      </div>
+
+      <div class="end-day-section">
+        <div class="end-day-section-title">Completed today</div>
+        <div id="endDayCompleted" class="end-day-list"></div>
+      </div>
+
+      <div class="end-day-section">
+        <div class="end-day-section-title">Open tasks <span class="hint-inline">— pick what happens to each</span></div>
+        <div id="endDayIncomplete" class="end-day-incomplete"></div>
+      </div>
+
+      <div class="end-day-section">
+        <div class="end-day-section-title">Missing notes</div>
+        <div id="endDayMissingNotes" class="end-day-list"></div>
+        <button class="btn hidden" id="endDayMissingShortcut" style="margin-top:8px">Open missing-notes filter in Log</button>
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn" data-close="endDayModal">Cancel</button>
+        <button class="btn btn-primary" id="btnCommitEndDay">Save closeout</button>
       </div>
     </div>
   </div>

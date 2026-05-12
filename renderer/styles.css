@@ -669,3 +669,202 @@ body.widget-mode .full-view { display: none; }
 .quality-flag.tone-warn { border-left-color: var(--red); color: var(--text); background: rgba(227,91,91,0.08); }
 .quality-flag.tone-info { border-left-color: var(--blue); color: var(--text-dim); }
 .quality-flag.tone-good { border-left-color: var(--green); color: var(--text-dim); }
+
+/* ============================================================
+   PRODUCTIVITY — Today: End Day button, coach card
+   ============================================================ */
+.totals-row { display: flex; align-items: stretch; gap: 12px; margin-bottom: 16px; }
+.totals-row .totals { flex: 1; margin-bottom: 0; }
+.end-day-btn {
+  align-self: stretch;
+  padding: 10px 18px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  border-radius: 8px;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.end-day-btn:hover { background: var(--amber-dim); border-color: var(--amber); color: var(--amber); }
+
+.coach-card {
+  display: flex; gap: 10px; align-items: flex-start;
+  padding: 10px 14px;
+  background: linear-gradient(180deg, rgba(232,155,67,0.08), rgba(232,155,67,0.04));
+  border: 1px solid rgba(232,155,67,0.25);
+  border-radius: 8px;
+  margin-top: 10px;
+  font-size: 12px; line-height: 1.5; color: var(--text);
+}
+.coach-card-mark { color: var(--amber); font-size: 14px; line-height: 1.2; flex-shrink: 0; }
+.coach-card-text { font-style: italic; }
+
+/* ============================================================
+   PRODUCTIVITY — Nudges: popup, settings list, edit modal
+   ============================================================ */
+.nudge-popup { width: 420px; }
+.nudge-popup-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.nudge-popup-badge {
+  display: inline-block;
+  padding: 3px 8px;
+  background: var(--amber-dim);
+  border: 1px solid rgba(232,155,67,0.3);
+  border-radius: 4px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--amber);
+  font-weight: 700;
+}
+.nudge-popup-name { font-size: 16px; font-weight: 600; color: var(--text); }
+.nudge-popup-message { font-size: 13px; color: var(--text-dim); line-height: 1.5; margin-bottom: 10px; }
+.nudge-popup-timed { font-size: 11px; color: var(--text-faint); margin-bottom: 4px; }
+
+.nudge-controls-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+.nudge-pause-status { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+.nudge-pause-status.active { color: var(--amber); }
+
+.nudges-list { display: flex; flex-direction: column; gap: 6px; }
+.nudge-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  transition: border-color 0.15s;
+}
+.nudge-row:hover { border-color: var(--border-strong); }
+.nudge-row.disabled { opacity: 0.55; }
+.nudge-row-toggle input { width: 14px; height: 14px; cursor: pointer; accent-color: var(--amber); }
+.nudge-row-main { flex: 1; min-width: 0; }
+.nudge-row-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.nudge-row-name { font-size: 13px; font-weight: 600; color: var(--text); }
+.nudge-row-category {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.1em;
+  padding: 2px 6px; border-radius: 3px; font-weight: 700;
+  background: var(--surface-3); color: var(--text-dim);
+}
+.nudge-row-category.cat-health    { background: rgba(92,201,122,0.15);  color: var(--green); }
+.nudge-row-category.cat-focus     { background: rgba(91,155,227,0.15);  color: var(--blue); }
+.nudge-row-category.cat-admin     { background: rgba(196,204,91,0.15);  color: #c4cc5b; }
+.nudge-row-category.cat-planning  { background: rgba(152,116,227,0.15); color: var(--purple); }
+.nudge-row-category.cat-break     { background: rgba(232,155,67,0.15);  color: var(--amber); }
+.nudge-row-snoozed { font-size: 10px; color: var(--text-faint); font-style: italic; }
+.nudge-row-meta { font-size: 11px; color: var(--text-faint); margin-top: 2px; }
+.nudge-row-actions { flex-shrink: 0; }
+
+.nudge-days-row { display: flex; gap: 4px; flex-wrap: wrap; }
+.nudge-day-chip {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 10px; color: var(--text-dim);
+  cursor: pointer; transition: all 0.15s;
+  font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em;
+}
+.nudge-day-chip input { display: none; }
+.nudge-day-chip.selected { border-color: var(--amber); background: var(--amber-dim); color: var(--amber); }
+.nudge-day-chip:hover:not(.selected) { border-color: var(--border-strong); }
+
+.settings-subtitle { font-size: 10px; text-transform: uppercase; letter-spacing: 0.15em; color: var(--text-dim); font-weight: 600; margin-bottom: 6px; }
+
+/* ============================================================
+   PRODUCTIVITY — End Day modal
+   ============================================================ */
+.end-day-modal { width: 640px; max-width: calc(100vw - 32px); }
+.end-day-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 14px; }
+.end-day-date { font-size: 13px; color: var(--text); font-weight: 600; margin-top: 4px; }
+
+.end-day-timer-wrap {
+  padding: 10px 12px;
+  background: var(--amber-dim);
+  border: 1px solid rgba(232,155,67,0.3);
+  border-radius: 6px;
+  margin-bottom: 12px;
+}
+.end-day-timer-info { font-size: 12px; color: var(--amber); margin-bottom: 6px; font-weight: 600; }
+
+.end-day-section { margin-bottom: 16px; }
+.end-day-section-title { font-size: 10px; text-transform: uppercase; letter-spacing: 0.15em; color: var(--text-dim); font-weight: 600; margin-bottom: 8px; }
+.end-day-summary { font-size: 13px; line-height: 1.55; color: var(--text); margin-bottom: 10px; }
+
+.end-day-kpis {
+  display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px;
+  margin-bottom: 8px;
+}
+.end-day-kpis .kpi-tile { padding: 8px 6px; text-align: center; background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; }
+.end-day-kpis .kpi-value { font-family: 'JetBrains Mono', monospace; font-size: 15px; color: var(--text); }
+.end-day-kpis .kpi-label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-faint); margin-top: 2px; }
+
+.end-day-project-totals { display: flex; flex-direction: column; gap: 4px; }
+.end-day-project-row { display: flex; align-items: center; gap: 10px; padding: 6px 8px; background: var(--surface-2); border-radius: 4px; }
+.end-day-project-swatch { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.end-day-project-name { flex: 1; font-size: 12px; color: var(--text); }
+.end-day-project-time { font-size: 12px; color: var(--text-dim); }
+
+.end-day-list { display: flex; flex-direction: column; gap: 6px; }
+.end-day-incomplete { display: flex; flex-direction: column; gap: 8px; }
+
+.end-day-task {
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.end-day-task-head { margin-bottom: 8px; }
+.end-day-task-info { min-width: 0; }
+.end-day-task-name { font-size: 13px; color: var(--text); font-weight: 500; }
+.end-day-task-meta {
+  font-size: 11px; color: var(--text-faint);
+  display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+  margin-top: 3px;
+}
+.end-day-task-project { color: var(--text-dim); }
+.end-day-task-cf { color: var(--amber); }
+.end-day-task-actions { display: flex; gap: 4px; flex-wrap: wrap; }
+.end-day-action {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 11px; color: var(--text-dim);
+  cursor: pointer; transition: all 0.15s;
+}
+.end-day-action input { display: none; }
+.end-day-action:hover { border-color: var(--border-strong); color: var(--text); }
+.end-day-action.selected { border-color: var(--amber); background: var(--amber-dim); color: var(--amber); }
+
+/* ============================================================
+   PRODUCTIVITY — Insights: closeout history card
+   ============================================================ */
+.closeouts-wrap { display: flex; flex-direction: column; gap: 12px; }
+.closeout-latest {
+  padding: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.closeout-latest-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.closeout-latest-date { font-size: 13px; font-weight: 600; color: var(--text); }
+.closeout-latest-time { font-size: 11px; color: var(--text-dim); }
+.closeout-latest-summary { font-size: 12px; color: var(--text-dim); line-height: 1.5; margin-bottom: 6px; }
+.closeout-latest-coach { font-size: 12px; color: var(--amber); font-style: italic; margin-bottom: 8px; }
+.closeout-latest-stats { display: flex; gap: 12px; flex-wrap: wrap; font-size: 11px; color: var(--text-faint); }
+.closeout-latest-stats strong { color: var(--text); font-weight: 600; }
+.closeout-warn { color: var(--amber); }
+.closeout-history-title { font-size: 10px; text-transform: uppercase; letter-spacing: 0.15em; color: var(--text-faint); font-weight: 600; }
+.closeout-history-list { display: flex; flex-direction: column; gap: 4px; }
+.closeout-history-row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 6px 10px;
+  background: var(--surface-2);
+  border-radius: 4px;
+  font-size: 11px;
+}
+.closeout-history-date { color: var(--text); font-weight: 500; }
+.closeout-history-stats { color: var(--text-dim); font-family: 'JetBrains Mono', monospace; }
