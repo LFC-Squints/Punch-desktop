@@ -2881,6 +2881,15 @@ function updateMiniTimer() {
 // What's New Modal
 // ------------------------------------------------------------
 const WHATS_NEW_CONTENT = {
+  '1.4.6': `
+    <h3>🐛 Ghost timer window now actually appears in the taskbar</h3>
+    <ul>
+      <li>v1.4.5 set <code>focusable: false</code> on the ghost timer window — on Windows that quietly adds the <code>WS_EX_TOOLWINDOW</code> style, which <strong>also</strong> excludes the window from the taskbar. So the window existed but no taskbar entry ever appeared.</li>
+      <li>Removed that flag. The ghost is now focusable (but uses <code>showInactive()</code> so it never steals focus when shown).</li>
+      <li>Added <code>[taskbar]</code> diagnostic lines to the debug log so any remaining failure is visible (Settings → Open debug log).</li>
+    </ul>
+  `,
+
   '1.4.5': `
     <h3>📌 Pinned + live timer — proper Steam-style two-icon behavior</h3>
     <ul>

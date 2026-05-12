@@ -1,5 +1,5 @@
 // ============================================================
-// Punch — Electron main process (v1.4.5)
+// Punch — Electron main process (v1.4.6)
 // Tray app, frameless widget, global hotkeys, idle detection,
 // active-window polling, and GitHub-based auto-updates.
 // ============================================================
@@ -169,7 +169,10 @@ function ensureTimerWindow() {
     frame: false,
     transparent: true,
     skipTaskbar: false,             // show in taskbar
-    focusable: false,               // don't steal focus; also excludes from Alt+Tab on Windows
+    // Note: do NOT set focusable: false here. On Windows that adds the
+    // WS_EX_TOOLWINDOW style which also excludes the window from the
+    // taskbar — defeating the entire point. The ghost is focusable but
+    // we use showInactive() so it never steals focus.
     minimizable: false,
     maximizable: false,
     resizable: false,
@@ -184,12 +187,15 @@ function ensureTimerWindow() {
     }
   });
 
+  writeLog('[taskbar] timer window created');
+
   if (process.platform === 'win32') {
     try {
       timerWindow.setAppDetails({
         appId: 'com.justin.punch.live',
         relaunchDisplayName: 'Punch Timer'
       });
+      writeLog('[taskbar] setAppDetails applied to timer window');
     } catch (e) {
       writeLog(`[taskbar] timerWindow setAppDetails failed: ${e.message}`);
     }
@@ -257,6 +263,7 @@ function updateTaskbarIcon(timerText, dataUrl) {
     if (!w.isVisible()) {
       // showInactive avoids stealing focus from whatever the user is doing.
       w.showInactive();
+      writeLog('[taskbar] timer window shown in taskbar');
     }
   } catch (err) {
     writeLog(`[taskbar] update failed: ${err.message}`);
