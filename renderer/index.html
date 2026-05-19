@@ -85,7 +85,7 @@
       <button class="tab active" data-tab="today">Today</button>
       <button class="tab" data-tab="log">Log</button>
       <button class="tab" data-tab="tasks">Tasks</button>
-      <button class="tab" data-tab="projects">Projects</button>
+      <button class="tab" data-tab="focus">Focus</button>
       <button class="tab" data-tab="insights">Insights</button>
       <button class="tab" data-tab="summary">AI Summary</button>
       <button class="tab" data-tab="settings">Settings</button>
@@ -93,21 +93,49 @@
 
     <!-- TODAY -->
     <div class="tab-pane active" data-pane="today">
-      <div class="totals-row">
-        <div class="totals">
-          <div class="total-cell"><div class="total-label">Today</div><div id="totalToday" class="total-value">0:00</div></div>
-          <div class="total-cell"><div class="total-label">This week</div><div id="totalWeek" class="total-value">0:00</div></div>
-          <div class="total-cell"><div class="total-label">Last 30 days</div><div id="totalMonth" class="total-value">0:00</div></div>
+
+      <!-- Daily snapshot -->
+      <section class="today-snapshot">
+        <div class="snap-kpis">
+          <div class="snap-kpi"><div class="snap-kpi-label">Today</div><div id="totalToday" class="snap-kpi-value">0:00</div></div>
+          <div class="snap-kpi"><div class="snap-kpi-label">This week</div><div id="totalWeek" class="snap-kpi-value">0:00</div></div>
+          <div class="snap-kpi"><div class="snap-kpi-label">Completed</div><div id="snapCompleted" class="snap-kpi-value">0</div></div>
+          <div class="snap-kpi"><div class="snap-kpi-label">Open</div><div id="snapOpen" class="snap-kpi-value">0</div></div>
+          <div class="snap-kpi"><div class="snap-kpi-label">Missing notes</div><div id="snapMissingNotes" class="snap-kpi-value">0</div></div>
         </div>
-        <button class="btn end-day-btn" id="btnEndDay" title="Generate a closeout summary for today">End Day</button>
-      </div>
-      <div id="todaysPlan" class="todays-plan"></div>
-      <div class="entries-toolbar">
-        <button class="btn" id="btnManualEntry">+ Manual entry</button>
-        <button class="btn" id="btnExportCSV">Export CSV</button>
-        <input type="text" id="entrySearch" class="search-input" placeholder="Search entries…" />
-      </div>
-      <div id="entriesList" class="entries-list"></div>
+        <div class="snap-actions">
+          <div id="snapNudgePill" class="snap-nudge-pill" title="Nudge status">Nudges: …</div>
+          <button class="btn btn-distraction hidden" id="btnLogDistraction" title="Log a quick distraction or interruption">⚡ Log distraction</button>
+          <button class="btn end-day-btn" id="btnEndDay" title="Generate a closeout summary for today">End Day</button>
+        </div>
+        <!-- Keep the hidden Last-30 cell to avoid breaking any code that reads it -->
+        <span id="totalMonth" class="hidden">0:00</span>
+      </section>
+
+      <!-- Suggested Focus (rule-based, opt-in via Focus Tools setting) -->
+      <section id="suggestedFocus" class="suggested-focus hidden"></section>
+
+      <!-- Today's priorities -->
+      <section class="today-section">
+        <div class="today-section-header">
+          <span class="today-section-title">Today's priorities</span>
+          <span class="today-section-hint">overdue · due today · in progress</span>
+        </div>
+        <div id="todaysPlan" class="todays-plan"></div>
+      </section>
+
+      <!-- Today's log -->
+      <section class="today-section">
+        <div class="today-section-header">
+          <span class="today-section-title">Today's log</span>
+          <div class="today-log-toolbar">
+            <button class="btn btn-mini-toolbar" id="btnManualEntry">+ Manual entry</button>
+            <button class="btn btn-mini-toolbar" id="btnExportCSV">Export CSV</button>
+            <input type="text" id="entrySearch" class="search-input search-input-sm" placeholder="Search entries…" />
+          </div>
+        </div>
+        <div id="entriesList" class="entries-list"></div>
+      </section>
     </div>
 
     <!-- LOG -->
@@ -175,12 +203,49 @@
       <div id="tasksList" class="tasks-list"></div>
     </div>
 
-    <!-- PROJECTS -->
-    <div class="tab-pane" data-pane="projects">
-      <div class="entries-toolbar">
-        <button class="btn btn-primary" id="btnAddProject">+ New project</button>
+    <!-- FOCUS -->
+    <div class="tab-pane" data-pane="focus">
+      <div class="focus-toolbar">
+        <div class="field-inline">
+          <label class="field-label">Range</label>
+          <div class="focus-range-buttons">
+            <button class="focus-range-btn active" data-focus-range="today">Today</button>
+            <button class="focus-range-btn" data-focus-range="thisWeek">This week</button>
+          </div>
+          <span id="focusRangeLabel" class="hint-inline"></span>
+        </div>
+        <div class="focus-toolbar-spacer"></div>
+        <button class="btn" id="btnFocusGotoSettings">Manage rules</button>
       </div>
-      <div id="projectsList" class="projects-list"></div>
+
+      <div id="focusSummary" class="focus-summary"></div>
+
+      <div class="focus-grid">
+        <div class="focus-card">
+          <div class="focus-card-title">App &amp; site usage</div>
+          <div id="focusAppUsage" class="focus-usage-list"></div>
+        </div>
+        <div class="focus-card">
+          <div class="focus-card-title">Top distractions <span class="hint-inline">— matched distraction rules</span></div>
+          <div id="focusDistractions" class="focus-usage-list"></div>
+        </div>
+      </div>
+
+      <div class="focus-grid">
+        <div class="focus-card">
+          <div class="focus-card-title">Idle time</div>
+          <div id="focusIdle" class="focus-idle"></div>
+        </div>
+        <div class="focus-card">
+          <div class="focus-card-title">Suggested focus</div>
+          <div id="focusSuggested" class="focus-suggested-inline"></div>
+        </div>
+      </div>
+
+      <div class="focus-card">
+        <div class="focus-card-title">Recent focus events <span class="hint-inline">— last 20</span></div>
+        <div id="focusRecent" class="focus-recent"></div>
+      </div>
     </div>
 
     <!-- INSIGHTS -->
@@ -199,6 +264,10 @@
         </div>
       </div>
       <div id="insightsKpis" class="insights-kpis"></div>
+      <div class="insights-card" id="attentionDriftCard">
+        <div class="insights-card-title">Attention drift <span class="hint-inline">— today's focus signals</span></div>
+        <div id="attentionDrift" class="attention-drift"></div>
+      </div>
       <div class="insights-grid">
         <div class="insights-card">
           <div class="insights-card-title">Daily activity <span class="hint-inline">— last 14 days</span></div>
@@ -271,134 +340,245 @@
     <!-- SETTINGS -->
     <div class="tab-pane" data-pane="settings">
 
-      <!-- UPDATES -->
-      <div class="settings-section">
-        <div class="settings-title">About &amp; updates</div>
-        <div class="field-inline">
-          <span class="hint-inline">Version <span id="appVersion" class="mono" style="color:var(--text)">…</span></span>
-          <button class="btn" id="btnCheckUpdate">Check for updates</button>
-          <button class="btn" id="btnShowShortcuts">Keyboard shortcuts</button>
+      <nav class="settings-subnav">
+        <button class="settings-subnav-btn active" data-subtab="workspace">Workspace Setup</button>
+        <button class="settings-subnav-btn" data-subtab="focus">Focus Tools</button>
+        <button class="settings-subnav-btn" data-subtab="data">Data &amp; Backup</button>
+        <button class="settings-subnav-btn" data-subtab="prefs">App Preferences</button>
+      </nav>
+
+      <!-- WORKSPACE SETUP -->
+      <div class="settings-subpane active" data-subpane="workspace">
+
+        <!-- PROJECTS -->
+        <div class="settings-section">
+          <div class="settings-title">Projects
+            <span class="hint-inline">— colors, subcategories, and time roll-ups</span>
+          </div>
+          <div class="hint-text" style="margin-bottom:10px">Create, edit, or archive projects. Click a project to edit it; use the buttons inside to manage subcategories or delete.</div>
+          <div id="projectsList" class="projects-list"></div>
+          <div class="field-inline" style="margin-top:10px">
+            <button class="btn btn-primary" id="btnAddProject">+ New project</button>
+          </div>
         </div>
-        <div id="updateStatus" class="update-status"></div>
+
+        <!-- ACCOUNTS -->
+        <div class="settings-section">
+          <div class="settings-title">
+            <span id="accountLabelTitle">Accounts</span>
+            <span class="hint-inline">— a dropdown shown on every entry</span>
+          </div>
+          <div class="field-inline" style="margin-bottom:10px">
+            <label class="field-label">Field label</label>
+            <input id="accountLabelInput" type="text" placeholder="e.g. Shop, Client, Franchise" style="width:200px" maxlength="30" />
+            <button class="btn" id="btnSetAccountLabel">Apply</button>
+          </div>
+          <div class="hint-text" style="margin-bottom:10px">
+            Rename this field to fit your context: "Shop", "Client", "Account", "Franchise Owner" — whatever works.
+          </div>
+          <div id="accountsList" class="accounts-list"></div>
+          <div class="field-inline" style="margin-top:8px">
+            <input id="newAccountInput" type="text" placeholder="e.g. Steve (the good one, not finance Steve)" maxlength="80" style="flex:1" />
+            <button class="btn btn-primary" id="btnAddAccount">Add</button>
+          </div>
+        </div>
+
+        <!-- SUBCATEGORIES -->
+        <div class="settings-section">
+          <div class="settings-title">Subcategories
+            <span class="hint-inline">— project-scoped tags for the kind of work</span>
+          </div>
+          <div class="hint-text" style="margin-bottom:10px">Add inline below, or open a project from above to manage its full set in the project editor.</div>
+          <div id="subcategoriesAdmin" class="subcategories-admin"></div>
+        </div>
       </div>
 
-      <!-- ACCOUNTS -->
-      <div class="settings-section">
-        <div class="settings-title">
-          <span id="accountLabelTitle">Accounts</span>
-          <span class="hint-inline">— a dropdown shown on every entry</span>
-        </div>
-        <div class="field-inline" style="margin-bottom:10px">
-          <label class="field-label">Field label</label>
-          <input id="accountLabelInput" type="text" placeholder="e.g. Shop, Client, Franchise" style="width:200px" maxlength="30" />
-          <button class="btn" id="btnSetAccountLabel">Apply</button>
-        </div>
-        <div class="hint-text" style="margin-bottom:10px">
-          Rename this field to fit your context: "Shop", "Client", "Account", "Franchise Owner" — whatever works.
-        </div>
-        <div id="accountsList" class="accounts-list"></div>
-        <div class="field-inline" style="margin-top:8px">
-          <input id="newAccountInput" type="text" placeholder="e.g. Steve (the good one, not finance Steve)" maxlength="80" style="flex:1" />
-          <button class="btn btn-primary" id="btnAddAccount">Add</button>
-        </div>
-      </div>
+      <!-- FOCUS TOOLS -->
+      <div class="settings-subpane" data-subpane="focus">
 
-      <div class="settings-section">
-        <div class="settings-title">Hotkey</div>
-        <div class="field-inline">
-          <input id="hotkeyInput" class="punch-select" type="text" placeholder="CommandOrControl+Alt+P" style="width:280px"/>
-          <button class="btn" id="btnSetHotkey">Apply</button>
-          <span id="hotkeyStatus" class="hint-inline"></span>
-        </div>
-        <div class="hint-text">Modifiers: <span class="kbd">CommandOrControl</span>, <span class="kbd">Alt</span>, <span class="kbd">Shift</span>. Triggers the timer globally + focuses notes field.</div>
-      </div>
+        <!-- FOCUS TRACKING -->
+        <div class="settings-section">
+          <div class="settings-title">Focus tracking
+            <span class="hint-inline">— foundation for the future Focus hub</span>
+          </div>
+          <div class="hint-text" style="margin-bottom:10px">
+            Captures small productivity signals (timer starts, task switches, optional app/window activity, distractions) so future Focus Insights can tell a vivid story of your day. All data stays local.
+          </div>
 
-      <div class="settings-section">
-        <div class="settings-title">Always on top</div>
-        <label class="checkbox"><input type="checkbox" id="aotToggle" checked /><span>Pin the widget above other windows</span></label>
-      </div>
-
-      <!-- NUDGES -->
-      <div class="settings-section">
-        <div class="settings-title">Nudges &amp; breaks</div>
-        <div class="hint-text" style="margin-bottom:10px">
-          Lightweight in-app prompts that fire on an interval while you're working.
-          Tip: the Mental break preset is seeded disabled — toggle it on below if you want a periodic reset reminder, or delete it from the list.
-        </div>
-
-        <div class="nudge-controls-row">
-          <button class="btn" data-pause-nudges="30">Pause 30 min</button>
-          <button class="btn" data-pause-nudges="60">Pause 1 hr</button>
-          <button class="btn" data-pause-nudges="tomorrow">Pause until tomorrow</button>
-          <button class="btn" id="btnResumeNudges">Resume</button>
-          <label class="checkbox" style="margin-left:auto">
-            <input type="checkbox" id="presentationToggle" /><span>Presentation mode</span>
+          <label class="checkbox" style="margin-top:6px">
+            <input type="checkbox" id="focusEnableWindowTracking" />
+            <span>Track active app/window <span class="hint-inline">— records when you switch apps</span></span>
           </label>
-        </div>
-        <div id="nudgePauseStatus" class="hint-text nudge-pause-status"></div>
-
-        <div id="nudgesList" class="nudges-list" style="margin-top:10px"></div>
-
-        <div class="field-inline" style="margin-top:10px">
-          <button class="btn btn-primary" id="btnAddNudge">+ New nudge</button>
-        </div>
-
-        <div class="settings-subtitle" style="margin-top:14px">Working hours</div>
-        <div class="hint-text" style="margin-bottom:8px">Used as the default window for nudges that respect working hours.</div>
-        <div class="field-inline" style="gap:10px;flex-wrap:wrap">
-          <label class="field-inline" style="gap:6px">
-            <span class="field-label">Start</span>
-            <input id="workingHoursStart" type="time" />
+          <label class="checkbox" style="margin-top:6px">
+            <input type="checkbox" id="focusTrackTitles" />
+            <span>Also capture window titles <span class="hint-inline">— extra detail; can be sensitive</span></span>
           </label>
-          <label class="field-inline" style="gap:6px">
-            <span class="field-label">End</span>
-            <input id="workingHoursEnd" type="time" />
+          <div class="field-inline" style="margin-top:8px;gap:8px">
+            <label class="field-label">Poll every</label>
+            <input id="focusInterval" type="number" min="5" max="300" step="5" style="width:80px" />
+            <span style="color:var(--text-dim)">seconds</span>
+          </div>
+          <div class="hint-text focus-privacy-note" style="margin-top:10px">
+            <strong>Privacy:</strong> Punch uses app + window names locally to build Focus insights. App/site labels come from rules you define — Punch does <em>not</em> capture screenshots, keystrokes, file contents, browser URLs, browser history, or message contents.
+          </div>
+
+          <div class="settings-subtitle" style="margin-top:14px">Other focus tools</div>
+          <label class="checkbox" style="margin-top:6px">
+            <input type="checkbox" id="focusEnableSuggested" checked />
+            <span>Show a Suggested Focus card on Today</span>
           </label>
-          <div class="nudge-days-row" id="workingHoursDays"></div>
+          <label class="checkbox" style="margin-top:6px">
+            <input type="checkbox" id="focusEnableDistractions" checked />
+            <span>Show the Log Distraction button on Today</span>
+          </label>
+          <label class="checkbox" style="margin-top:6px">
+            <input type="checkbox" id="focusEnableActivityRules" checked />
+            <span>Use activity rules to label apps/windows on the Focus tab</span>
+          </label>
+          <label class="checkbox" style="margin-top:6px">
+            <input type="checkbox" id="focusEnableUnloggedWork" checked />
+            <span>Prompt me when I've been active in a Work/Communication app without a timer</span>
+          </label>
+          <div class="field-inline" style="margin-top:8px;gap:8px">
+            <label class="field-label">Default unlogged prompt after</label>
+            <input id="focusUnloggedMinutes" type="number" min="1" max="180" step="1" style="width:80px" />
+            <span style="color:var(--text-dim)">minutes</span>
+          </div>
+        </div>
+
+        <!-- ACTIVITY RULES -->
+        <div class="settings-section">
+          <div class="settings-title">Activity rules
+            <span class="hint-inline">— label apps + window titles for Focus reports</span>
+          </div>
+          <div class="hint-text" style="margin-bottom:10px">
+            Match a pattern against the active app name and/or window title, then assign a label, category, and optional default project. Categories drive the Focus tab's distraction rollup and unlogged-work prompts.
+          </div>
+          <div id="activityRulesList" class="activity-rules-list"></div>
+          <div class="field-inline" style="margin-top:10px">
+            <button class="btn btn-primary" id="btnAddActivityRule">+ New rule</button>
+            <button class="btn" id="btnSeedActivityRules" title="Add common distraction rules (YouTube, Reddit, Twitter, Facebook)">Seed common distraction rules</button>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-title">Nudges &amp; breaks</div>
+          <div class="hint-text" style="margin-bottom:10px">
+            Lightweight in-app prompts that fire on an interval while you're working.
+            Tip: the Mental break preset is seeded disabled — toggle it on below if you want a periodic reset reminder, or delete it from the list.
+          </div>
+
+          <div class="nudge-controls-row">
+            <button class="btn" data-pause-nudges="30">Pause 30 min</button>
+            <button class="btn" data-pause-nudges="60">Pause 1 hr</button>
+            <button class="btn" data-pause-nudges="tomorrow">Pause until tomorrow</button>
+            <button class="btn" id="btnResumeNudges">Resume</button>
+            <label class="checkbox" style="margin-left:auto">
+              <input type="checkbox" id="presentationToggle" /><span>Presentation mode</span>
+            </label>
+          </div>
+          <div id="nudgePauseStatus" class="hint-text nudge-pause-status"></div>
+          <label class="checkbox" style="margin-top:8px">
+            <input type="checkbox" id="bringToFrontToggle" checked />
+            <span>Bring Punch to the front when a nudge fires</span>
+          </label>
+
+          <div id="nudgesList" class="nudges-list" style="margin-top:10px"></div>
+
+          <div class="field-inline" style="margin-top:10px">
+            <button class="btn btn-primary" id="btnAddNudge">+ New nudge</button>
+          </div>
+
+          <div class="settings-subtitle" style="margin-top:14px">Working hours</div>
+          <div class="hint-text" style="margin-bottom:8px">Used as the default window for nudges that respect working hours.</div>
+          <div class="field-inline" style="gap:10px;flex-wrap:wrap">
+            <label class="field-inline" style="gap:6px">
+              <span class="field-label">Start</span>
+              <input id="workingHoursStart" type="time" />
+            </label>
+            <label class="field-inline" style="gap:6px">
+              <span class="field-label">End</span>
+              <input id="workingHoursEnd" type="time" />
+            </label>
+            <div class="nudge-days-row" id="workingHoursDays"></div>
+          </div>
         </div>
       </div>
 
-      <div class="settings-section">
-        <div class="settings-title">Idle detection</div>
-        <label class="checkbox"><input type="checkbox" id="idleToggle" checked /><span>Detect when I step away</span></label>
-        <div class="field-inline" style="margin-top:8px">
-          <label class="field-label">Threshold</label>
-          <input id="idleThreshold" type="number" min="1" max="120" step="1" style="width:80px" />
-          <span style="color:var(--text-dim)">minutes</span>
+      <!-- DATA & BACKUP -->
+      <div class="settings-subpane" data-subpane="data">
+        <div class="settings-section">
+          <div class="settings-title">Data &amp; backup</div>
+          <div class="field-inline" style="flex-wrap:wrap;gap:8px">
+            <button class="btn" id="btnExportJson">Export JSON backup</button>
+            <button class="btn" id="btnImportJson">Import JSON backup</button>
+            <input id="importFile" type="file" accept="application/json" hidden />
+            <button class="btn" id="btnOpenDataDir">Open data folder</button>
+            <button class="btn" id="btnOpenLog">Open debug log</button>
+          </div>
+          <div class="hint-text" id="dataPathHint">Data file: <span class="mono"></span></div>
+          <div class="hint-text" style="margin-top:10px">More export formats (CSV entries, tasks, closeouts, nudge events) can be added here as Punch grows. Today's CSV exports still live on the Log and Today tabs.</div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-title">n8n / Webhook</div>
+          <div class="field-inline">
+            <input id="webhookUrl" class="punch-select" type="text" placeholder="https://your-n8n-instance/webhook/…" style="flex:1;min-width:300px"/>
+            <button class="btn" id="btnTestWebhook">Test</button>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-title">Danger zone</div>
+          <button class="btn btn-danger" id="btnWipe">Wipe all data</button>
         </div>
       </div>
 
-      <div class="settings-section">
-        <div class="settings-title">Autodetect <span id="adAvailability" class="hint-inline"></span></div>
-        <label class="checkbox"><input type="checkbox" id="autodetectToggle" /><span>Watch the active window and match against rules</span></label>
-        <div class="rules-table" id="rulesTable"></div>
-        <button class="btn" id="btnAddRule">+ Add rule</button>
-      </div>
+      <!-- APP PREFERENCES -->
+      <div class="settings-subpane" data-subpane="prefs">
+        <div class="settings-section">
+          <div class="settings-title">About &amp; updates</div>
+          <div class="field-inline">
+            <span class="hint-inline">Version <span id="appVersion" class="mono" style="color:var(--text)">…</span></span>
+            <button class="btn" id="btnCheckUpdate">Check for updates</button>
+            <button class="btn" id="btnShowShortcuts">Keyboard shortcuts</button>
+          </div>
+          <div id="updateStatus" class="update-status"></div>
+        </div>
 
-      <div class="settings-section">
-        <div class="settings-title">n8n / Webhook</div>
-        <div class="field-inline">
-          <input id="webhookUrl" class="punch-select" type="text" placeholder="https://your-n8n-instance/webhook/…" style="flex:1;min-width:300px"/>
-          <button class="btn" id="btnTestWebhook">Test</button>
+        <div class="settings-section">
+          <div class="settings-title">Hotkey</div>
+          <div class="field-inline">
+            <input id="hotkeyInput" class="punch-select" type="text" placeholder="CommandOrControl+Alt+P" style="width:280px"/>
+            <button class="btn" id="btnSetHotkey">Apply</button>
+            <span id="hotkeyStatus" class="hint-inline"></span>
+          </div>
+          <div class="hint-text">Modifiers: <span class="kbd">CommandOrControl</span>, <span class="kbd">Alt</span>, <span class="kbd">Shift</span>. Triggers the timer globally + focuses notes field.</div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-title">Always on top</div>
+          <label class="checkbox"><input type="checkbox" id="aotToggle" checked /><span>Pin the widget above other windows</span></label>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-title">Idle detection</div>
+          <label class="checkbox"><input type="checkbox" id="idleToggle" checked /><span>Detect when I step away</span></label>
+          <div class="field-inline" style="margin-top:8px">
+            <label class="field-label">Threshold</label>
+            <input id="idleThreshold" type="number" min="1" max="120" step="1" style="width:80px" />
+            <span style="color:var(--text-dim)">minutes</span>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-title">Autodetect <span id="adAvailability" class="hint-inline"></span></div>
+          <label class="checkbox"><input type="checkbox" id="autodetectToggle" /><span>Watch the active window and match against rules</span></label>
+          <div class="rules-table" id="rulesTable"></div>
+          <button class="btn" id="btnAddRule">+ Add rule</button>
         </div>
       </div>
 
-      <div class="settings-section">
-        <div class="settings-title">Data &amp; backup</div>
-        <div class="field-inline" style="flex-wrap:wrap;gap:8px">
-          <button class="btn" id="btnExportJson">Export JSON backup</button>
-          <button class="btn" id="btnImportJson">Import JSON backup</button>
-          <input id="importFile" type="file" accept="application/json" hidden />
-          <button class="btn" id="btnOpenDataDir">Open data folder</button>
-          <button class="btn" id="btnOpenLog">Open debug log</button>
-        </div>
-        <div class="hint-text" id="dataPathHint">Data file: <span class="mono"></span></div>
-      </div>
-
-      <div class="settings-section">
-        <div class="settings-title">Danger zone</div>
-        <button class="btn btn-danger" id="btnWipe">Wipe all data</button>
-      </div>
     </div>
 
   </div><!-- /full-view -->
@@ -733,6 +913,126 @@
       <div class="modal-actions">
         <button class="btn" data-close="endDayModal">Cancel</button>
         <button class="btn btn-primary" id="btnCommitEndDay">Save closeout</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Activity Rule Modal -->
+  <div id="activityRuleModal" class="modal-overlay">
+    <div class="modal">
+      <div class="modal-title" id="activityRuleModalTitle">New activity rule</div>
+      <div class="field">
+        <label class="field-label">Name</label>
+        <input id="ruleNameInput" type="text" placeholder="e.g. YouTube" maxlength="80" />
+      </div>
+      <div class="row-2">
+        <div class="field">
+          <label class="field-label">Match by</label>
+          <select id="ruleMatchType" class="punch-select">
+            <option value="appAndTitle">App + title (both must match)</option>
+            <option value="appName">App name only</option>
+            <option value="windowTitle">Window title only</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="field-label">Category</label>
+          <select id="ruleCategory" class="punch-select">
+            <option value="Work">Work</option>
+            <option value="Communication">Communication</option>
+            <option value="Distraction">Distraction</option>
+            <option value="Utility">Utility</option>
+            <option value="Break">Break</option>
+            <option value="Custom">Custom</option>
+          </select>
+        </div>
+      </div>
+      <div class="row-2">
+        <div class="field">
+          <label class="field-label">App name contains</label>
+          <input id="ruleAppPattern" type="text" placeholder="e.g. Chrome" maxlength="80" />
+        </div>
+        <div class="field">
+          <label class="field-label">Window title contains</label>
+          <input id="ruleTitlePattern" type="text" placeholder="e.g. YouTube" maxlength="120" />
+        </div>
+      </div>
+      <div class="field">
+        <label class="field-label">Display label <span class="hint-inline">— what shows on Focus</span></label>
+        <input id="ruleLabelInput" type="text" placeholder="e.g. YouTube" maxlength="80" />
+      </div>
+      <div class="row-2">
+        <div class="field">
+          <label class="field-label">Default project <span class="hint-inline">— optional</span></label>
+          <select id="ruleDefaultProject" class="punch-select"></select>
+        </div>
+        <div class="field">
+          <label class="field-label">Default subcategory <span class="hint-inline">— optional</span></label>
+          <select id="ruleDefaultSubcat" class="punch-select"></select>
+        </div>
+      </div>
+      <div class="field">
+        <label class="checkbox">
+          <input type="checkbox" id="rulePromptToLog" />
+          <span>Prompt me to log time spent in this rule (Unlogged Work)</span>
+        </label>
+        <div class="field-inline" style="margin-top:6px;gap:8px">
+          <label class="field-label">Prompt after</label>
+          <input id="rulePromptAfter" type="number" min="1" max="180" step="1" style="width:80px" placeholder="30" />
+          <span style="color:var(--text-dim)">minutes</span>
+        </div>
+      </div>
+      <div class="field">
+        <label class="checkbox">
+          <input type="checkbox" id="ruleEnabled" checked />
+          <span>Enabled</span>
+        </label>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-danger" id="btnDeleteRuleAdmin" style="margin-right:auto">Delete</button>
+        <button class="btn" data-close="activityRuleModal">Cancel</button>
+        <button class="btn btn-primary" id="btnSaveActivityRule">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Unlogged Work Prompt Modal -->
+  <div id="unloggedWorkModal" class="modal-overlay">
+    <div class="modal">
+      <div class="modal-title">Log unlogged work?</div>
+      <div class="unlogged-prompt-info">
+        <div class="unlogged-prompt-label" id="unloggedPromptLabel"></div>
+        <div class="unlogged-prompt-duration" id="unloggedPromptDuration"></div>
+        <div class="unlogged-prompt-sub" id="unloggedPromptSub"></div>
+      </div>
+      <div class="field" id="unloggedProjectRow">
+        <label class="field-label">Log to project</label>
+        <select id="unloggedProjectSel" class="punch-select"></select>
+      </div>
+      <div class="modal-actions" style="flex-wrap:wrap;gap:8px">
+        <button class="btn" id="btnUnloggedDontAsk" style="margin-right:auto">Don't ask for this label</button>
+        <button class="btn" id="btnUnloggedSnooze">Snooze 15m</button>
+        <button class="btn" id="btnUnloggedIgnore">Ignore</button>
+        <button class="btn btn-primary" id="btnUnloggedLog">Log it</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Distraction Modal -->
+  <div id="distractionModal" class="modal-overlay">
+    <div class="modal">
+      <div class="modal-title">Log distraction</div>
+      <div id="distractionContext" class="distraction-context"></div>
+      <div class="field">
+        <label class="field-label">What happened?</label>
+        <div id="distractionTypes" class="distraction-types"></div>
+      </div>
+      <div class="field">
+        <label class="field-label">Note <span class="hint-inline">— optional</span></label>
+        <input id="distractionNote" type="text" placeholder="A few words for future-you (e.g. AutoIntegrate issue)" maxlength="240" />
+      </div>
+      <div class="modal-actions">
+        <button class="btn" data-close="distractionModal">Cancel</button>
+        <button class="btn btn-primary" id="btnSaveDistraction">Log it</button>
       </div>
     </div>
   </div>

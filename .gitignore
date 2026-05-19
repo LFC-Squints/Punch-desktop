@@ -23,3 +23,12 @@ Thumbs.db
 
 # Local data files (don't commit user data)
 punch-data.json
+
+# Claude Code local state
+.claude/
+
+# Claude Code local state
+.claude/
+
+# Local handoff/session notes
+handoff.md
