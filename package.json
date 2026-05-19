@@ -1,6 +1,6 @@
 {
   "name": "punch-desktop",
-  "version": "1.5.0",
+  "version": "2.0.0",
   "description": "Self-hosted desktop time tracker with subcategories, tasks, accounts, hotkeys, nudges, daily closeouts, and AI summary export",
   "main": "main.js",
   "scripts": {
@@ -16,9 +16,9 @@
     "electron-builder": "^24.13.3"
   },
   "dependencies": {
-    "active-win": "^7.7.2",
     "canvas": "^3.2.3",
-    "electron-updater": "^6.3.9"
+    "electron-updater": "^6.3.9",
+    "get-windows": "^9.2.0"
   },
   "build": {
     "appId": "com.justin.punch",

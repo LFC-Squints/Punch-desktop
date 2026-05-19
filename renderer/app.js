@@ -10,16 +10,34 @@ const DEFAULT_HOTKEY = 'CommandOrControl+Alt+P';
 const WIDGET_SIZE = { width: 360, height: 380 };
 const FULL_SIZE   = { width: 920, height: 720 };
 
-// Bumped to 2 with the productivity feature set (nudges, daily closeouts,
-// auto carry-forward). Migrations live in migrateData().
-const CURRENT_SCHEMA_VERSION = 2;
+// Bumped to 4 with Focus tab v1 (activityRules, idle events,
+// unlogged-work detection). Strictly additive again.
+const CURRENT_SCHEMA_VERSION = 4;
 
 const defaultProductivitySettings = () => ({
   workingHours: { start: '09:00', end: '17:00', days: [1,2,3,4,5] }, // Mon–Fri
   nudgePauseUntil: null,            // ms epoch; null = not paused
   presentationModeEnabled: false,
   mentalBreakSeeded: false,         // one-time flag so we only auto-seed once
-  defaultRespectWorkingHours: true
+  defaultRespectWorkingHours: true,
+  bringToFrontForNudges: true       // restore/focus Punch when a nudge fires
+});
+
+// Focus Signals settings — privacy-first defaults. Tracking is opt-in;
+// title capture is opt-in even after tracking is on. The 30s interval
+// keeps the active-win poll well below noticeable CPU impact while still
+// catching the productivity-meaningful "I just spent 8 minutes in Outlook"
+// signal we care about.
+const defaultFocusSettings = () => ({
+  enableWindowTracking: false,
+  trackWindowTitles: false,
+  windowTrackingIntervalSeconds: 30,
+  enableSuggestedFocus: true,
+  enableDistractionLogging: true,
+  // Focus v1 — activity rules + unlogged work detection
+  enableActivityRules: true,
+  enableUnloggedWorkDetection: true,
+  defaultUnloggedPromptMinutes: 30
 });
 
 const defaultData = () => ({
@@ -27,12 +45,14 @@ const defaultData = () => ({
   projects: [{ id:'p_default', name:'General', color:'#e89b43', archived:false, subcategories:[] }],
   entries: [], tasks: [], accounts: [], activeTimer: null, rules: [],
   nudges: [], nudgeEvents: [], dailyCloseouts: [],
+  focusEvents: [], activityRules: [],
   settings: {
     hotkey: DEFAULT_HOTKEY, alwaysOnTop: true,
     idleEnabled: true, idleThresholdMin: 5,
     autodetectEnabled: false, webhookUrl: '',
     accountLabel: 'Account',
-    productivity: defaultProductivitySettings()
+    productivity: defaultProductivitySettings(),
+    focus: defaultFocusSettings()
   },
   nextId: 2
 });
@@ -91,6 +111,7 @@ async function init(){
   renderAll();
   attachIPCListeners();
   startNudgeScheduler();
+  applyFocusSettings();
   if (state.activeTimer) startTick();
 }
 
@@ -111,6 +132,11 @@ function mergeWithDefaults(loaded){
     ...d.settings.productivity.workingHours,
     ...((loadedSettings.productivity && loadedSettings.productivity.workingHours) || {})
   };
+  // Focus settings — privacy-first defaults applied for any pre-v3 load.
+  merged.settings.focus = {
+    ...d.settings.focus,
+    ...(loadedSettings.focus || {})
+  };
   merged.projects = (loaded.projects || []).map(p => ({ archived:false, subcategories:[], ...p }));
   merged.entries  = (loaded.entries  || []).map(e => ({
     taskId: null,
@@ -126,6 +152,8 @@ function mergeWithDefaults(loaded){
   merged.nudges        = (loaded.nudges || []).map(normalizeNudgeShape);
   merged.nudgeEvents   = loaded.nudgeEvents || [];
   merged.dailyCloseouts = loaded.dailyCloseouts || [];
+  merged.focusEvents   = loaded.focusEvents || [];
+  merged.activityRules = loaded.activityRules || [];
   merged.nextId   = loaded.nextId   || 1;
   merged.schemaVersion = CURRENT_SCHEMA_VERSION;
   return merged;
@@ -664,7 +692,8 @@ function renderTotals(){
   const now=Date.now();
   document.getElementById('totalToday').textContent=formatHM(sumAllMs(startOfDay(now),now));
   document.getElementById('totalWeek').textContent=formatHM(sumAllMs(startOfWeek(now),now));
-  document.getElementById('totalMonth').textContent=formatHM(sumAllMs(now-30*86400000,now));
+  const mEl = document.getElementById('totalMonth');
+  if(mEl) mEl.textContent=formatHM(sumAllMs(now-30*86400000,now));
 }
 
 function matchesSearch(e, term){
@@ -685,11 +714,23 @@ function matchesSearch(e, term){
 function renderEntries(){
   const list=document.getElementById('entriesList');
   list.innerHTML='';
-  const searched = state.entries.filter(e => matchesSearch(e, entrySearchTerm));
+  // Today tab is the daily hub: when not searching, scope the list to today
+  // so the Today log feels focused. Searching opens the full multi-day view —
+  // users can pull historical entries back into context without leaving the
+  // tab. The Log tab still has the unfiltered multi-day view.
+  const todayStart = startOfDay(Date.now());
+  const filterPool = entrySearchTerm
+    ? state.entries
+    : state.entries.filter(e => e.endMs > todayStart);
+  const searched = filterPool.filter(e => matchesSearch(e, entrySearchTerm));
   if(searched.length===0){
-    list.innerHTML = entrySearchTerm
-      ? `<div class="empty">No entries match "${esc(entrySearchTerm)}".</div>`
-      : `<div class="empty">No entries yet. Punch in above to start logging time.</div>`;
+    if(entrySearchTerm){
+      list.innerHTML = `<div class="empty">No entries match "${esc(entrySearchTerm)}".</div>`;
+    } else if(state.entries.length === 0){
+      list.innerHTML = `<div class="empty">No entries yet. Punch in above to start logging time.</div>`;
+    } else {
+      list.innerHTML = `<div class="empty">No entries today yet. Punch in above to start logging time.</div>`;
+    }
     return;
   }
   const sorted=[...searched].sort((a,b)=>b.startMs-a.startMs);
@@ -984,10 +1025,128 @@ function renderRules(){
 }
 
 function renderAll(){
-  renderTimerWidget(); renderTotals(); renderTodaysPlan(); renderEntries();
-  renderTasks(); renderProjects(); renderRules();
+  renderTimerWidget(); renderTotals(); renderDailySnapshot();
+  renderTodaysPlan(); renderEntries();
+  renderTasks(); renderProjects(); renderSubcategoriesAdmin(); renderRules();
   renderAccountsList(); updateAccountLabels(); renderLog();
   renderNudgeManager(); renderNudgePauseStatus();
+  renderDistractionButton(); renderSuggestedFocusCard();
+  renderActivityRulesList();
+}
+
+// ------------------------------------------------------------
+// Settings → Workspace Setup → Subcategories admin
+// ------------------------------------------------------------
+// Subcategories live on the project (project.subcategories[]); previously
+// they were only editable from inside the Project edit modal. This admin
+// surface lists them grouped by project so they can be added/removed
+// without opening each project individually.
+function renderSubcategoriesAdmin(){
+  const wrap = document.getElementById('subcategoriesAdmin');
+  if(!wrap) return;
+  const projects = state.projects.filter(p => !p.archived);
+  if(projects.length === 0){
+    wrap.innerHTML = '<div class="empty" style="padding:14px">Add a project above first — subcategories belong to a project.</div>';
+    return;
+  }
+  wrap.innerHTML = projects.map(p => {
+    const subs = p.subcategories || [];
+    const chips = subs.map(s => `
+      <span class="subcat-admin-chip" data-subcat-id="${esc(s.id)}">
+        ${esc(s.name)}
+        <button class="subcat-admin-chip-del" data-subcat-del="${esc(p.id)}:${esc(s.id)}" title="Delete subcategory">×</button>
+      </span>`).join('');
+    const empty = subs.length === 0
+      ? '<span class="subcat-admin-empty">No subcategories yet</span>'
+      : '';
+    return `
+      <div class="subcat-admin-group" data-subcat-group="${esc(p.id)}">
+        <div class="subcat-admin-head">
+          <span class="subcat-admin-swatch" style="background:${esc(p.color)}"></span>
+          <span class="subcat-admin-name">${esc(p.name)}</span>
+          <span class="subcat-admin-count">${subs.length} subcat${subs.length===1?'':'s'}</span>
+        </div>
+        <div class="subcat-admin-chips">
+          ${chips}
+          ${empty}
+          <button class="subcat-admin-add" data-subcat-add="${esc(p.id)}">+ add</button>
+        </div>
+      </div>`;
+  }).join('');
+
+  wrap.querySelectorAll('[data-subcat-del]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const [projectId, subId] = btn.dataset.subcatDel.split(':');
+      const p = getProject(projectId); if(!p) return;
+      const sub = (p.subcategories || []).find(s => s.id === subId);
+      if(!sub) return;
+      if(!confirm(`Delete subcategory "${sub.name}" from ${p.name}? Existing entries that reference it will keep the name in their record.`)) return;
+      p.subcategories = (p.subcategories || []).filter(s => s.id !== subId);
+      save();
+      renderSubcategoriesAdmin();
+      // Refresh dropdowns that show subcats — the timer widget + open modals.
+      renderTimerWidget();
+    });
+  });
+
+  wrap.querySelectorAll('[data-subcat-add]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const projectId = btn.dataset.subcatAdd;
+      quickAddSubcat(projectId, () => {
+        renderSubcategoriesAdmin();
+        renderTimerWidget();
+      });
+    });
+  });
+}
+
+// ------------------------------------------------------------
+// Today — Daily snapshot
+// ------------------------------------------------------------
+// Cheap to compute; called from renderAll + after timer ticks since the
+// elapsed totals shift while a timer is running. Reuses existing selectors
+// so it stays consistent with the End Day modal.
+function renderDailySnapshot(){
+  const now = Date.now();
+  const completedToday = getCompletedTasksForDate(now).length;
+  const openTasks = getIncompleteTasksForDate(now).length;
+  const missingNotes = getMissingNoteEntries(now).length;
+
+  const completedEl = document.getElementById('snapCompleted');
+  const openEl = document.getElementById('snapOpen');
+  const missingEl = document.getElementById('snapMissingNotes');
+  if(completedEl) completedEl.textContent = String(completedToday);
+  if(openEl){
+    openEl.textContent = String(openTasks);
+    openEl.classList.toggle('warn', openTasks >= 5);
+  }
+  if(missingEl){
+    missingEl.textContent = String(missingNotes);
+    missingEl.classList.toggle('warn', missingNotes > 0);
+  }
+  renderNudgeStatusPill();
+}
+
+function renderNudgeStatusPill(){
+  const el = document.getElementById('snapNudgePill');
+  if(!el) return;
+  const p = state.settings.productivity || {};
+  el.classList.remove('active','paused','presentation');
+  if(p.presentationModeEnabled){
+    el.classList.add('presentation');
+    el.textContent = 'Nudges: presentation';
+  } else if(p.nudgePauseUntil && p.nudgePauseUntil > Date.now()){
+    el.classList.add('paused');
+    const t = new Date(p.nudgePauseUntil);
+    const sameDay = startOfDay(p.nudgePauseUntil) === startOfDay(Date.now());
+    const label = sameDay
+      ? t.toLocaleTimeString([], { hour:'numeric', minute:'2-digit' })
+      : t.toLocaleDateString([], { month:'short', day:'numeric' });
+    el.textContent = `Nudges: paused · until ${label}`;
+  } else {
+    el.classList.add('active');
+    el.textContent = 'Nudges: active';
+  }
 }
 
 // ------------------------------------------------------------
@@ -1045,6 +1204,7 @@ function startTimer(opts={}){
   save(); renderAll(); startTick();
   updateMiniTimer(); // Update mini mode button state
   toast('Timer started');
+  recordFocusEvent('timer_started', getActiveWorkContext());
 }
 
 function stopTimer(){
@@ -1066,12 +1226,18 @@ function stopTimer(){
     startMs:state.activeTimer.startMs, endMs,
     createdAt: Date.now()
   });
+  const stoppedContext = {
+    projectId, taskId,
+    entryId: state.entries[state.entries.length-1].id,
+    timerRunning: false
+  };
   state.activeTimer=null;
   document.getElementById('notesInput').value='';
   document.getElementById('taskSel').value='';
   save(); renderAll(); stopTick();
   updateMiniTimer(); // Update mini mode button state
   toast('Logged '+formatHMS(duration));
+  recordFocusEvent('timer_stopped', stoppedContext, { durationMs: duration });
 }
 
 function resumeEntry(entryId){
@@ -1193,14 +1359,20 @@ function bindActiveTimerInputs(){
     renderTaskOptions(taskSel, projSel.value, keptTaskId);
     renderSubcatOptions(subSel, projSel.value, null);
     if(state.activeTimer && projSel.value){
+      const prevProjectId = state.activeTimer.projectId;
       state.activeTimer.projectId=projSel.value;
       state.activeTimer.subcategoryId=null;
       // Don't clear taskId — entry preserves the manual project anyway.
       save();
+      if(prevProjectId && prevProjectId !== projSel.value){
+        recordFocusEvent('project_switched', getActiveWorkContext(),
+          { fromProjectId: prevProjectId, toProjectId: projSel.value });
+      }
     }
   });
   taskSel.addEventListener('change',()=>{
     const taskId = taskSel.value || null;
+    const prevTaskId = state.activeTimer ? (state.activeTimer.taskId || null) : null;
     if(taskId){
       applyTaskToTimerInputs(taskId);
     } else if(state.activeTimer){
@@ -1209,6 +1381,10 @@ function bindActiveTimerInputs(){
       renderTimerWidget();
     } else {
       renderTimerWidget();
+    }
+    if(state.activeTimer && prevTaskId !== taskId){
+      recordFocusEvent('task_switched', getActiveWorkContext(),
+        { fromTaskId: prevTaskId, toTaskId: taskId });
     }
   });
   subSel.addEventListener('change',()=>{ if(state.activeTimer){ state.activeTimer.subcategoryId=subSel.value||null; save(); } });
@@ -1603,6 +1779,12 @@ function toggleTaskComplete(taskId){
   t.status = t.completed ? 'completed' : 'active';
   t.updatedAt = now;
   save(); renderAll(); toast(t.completed?'Task marked complete':'Task reopened');
+  if(t.completed){
+    recordFocusEvent('task_completed', {
+      projectId: taskPrimaryProject(t),
+      taskId: t.id
+    }, { taskName: t.name });
+  }
 }
 
 // ------------------------------------------------------------
@@ -2615,6 +2797,26 @@ function commitDailyCloseout(preview, selections){
   };
   state.dailyCloseouts.push(record);
   save();
+  // Emit focus events so future Focus Insights can correlate End Day actions
+  // with the rest of the day's signals. One event per carried task lets
+  // attention-drift reports surface tasks that repeatedly slip.
+  recordFocusEvent('end_day_completed', { projectId: preview.topProjectId, taskId: null }, {
+    closeoutId: record.id,
+    totalTrackedMinutes: record.totalTrackedMinutes,
+    completedCount: allCompletedIds.length,
+    carriedCount: carriedForwardTaskIds.length,
+    archivedCount: archivedDuringCloseoutIds.length
+  });
+  for(const taskId of carriedForwardTaskIds){
+    const t = getTask(taskId);
+    recordFocusEvent('task_carried_forward', {
+      projectId: t ? taskPrimaryProject(t) : null,
+      taskId
+    }, {
+      carryForwardCount: t ? t.carryForwardCount : null,
+      closeoutId: record.id
+    });
+  }
   return record;
 }
 
@@ -2730,12 +2932,32 @@ function createNudgeTriggerEvent(nudge){
   return ev;
 }
 
-// Push the nudge into the popup (or queue it if the app is hidden).
+// Returns true if the bring-to-front side-effect should be skipped for a
+// nudge fire. We don't want to yank focus when the user has explicitly
+// signalled "leave me alone" (presentation mode, global pause). Per-nudge
+// snooze is handled upstream by shouldNudgeFire and never reaches here.
+function shouldSuppressNudgeBringToFront(){
+  const p = state.settings.productivity || {};
+  if(p.bringToFrontForNudges === false) return true;
+  if(p.presentationModeEnabled) return true;
+  if(p.nudgePauseUntil && p.nudgePauseUntil > Date.now()) return true;
+  return false;
+}
+
+function requestBringToFrontForNudge(){
+  if(shouldSuppressNudgeBringToFront()) return;
+  try { window.punch.bringToFrontForNudge(); } catch(_) {}
+}
+
+// Push the nudge into the popup (or queue it if a popup is already up).
+// Previously we also queued when the app was hidden; now we ask the main
+// process to restore/focus the window so the nudge is actually seen.
 function deliverNudge(nudge, event){
-  if(document.visibilityState !== 'visible' || currentNudgePopup){
+  if(currentNudgePopup){
     pendingNudgeQueue.push({ eventId: event.id, nudgeId: nudge.id });
     return;
   }
+  requestBringToFrontForNudge();
   showNudgePopup(nudge, event);
 }
 
@@ -2756,6 +2978,7 @@ function flushPendingNudgeQueue(){
   const nudge = state.nudges.find(n => n.id === item.nudgeId);
   const event = state.nudgeEvents.find(e => e.id === item.eventId);
   if(nudge && event){
+    requestBringToFrontForNudge();
     showNudgePopup(nudge, event);
   } else {
     save();
@@ -2837,6 +3060,1264 @@ function maybeSeedMentalBreakNudge(){
 // PRODUCTIVITY — End-of-block divider
 // ============================================================
 
+// ============================================================
+// FOCUS SIGNALS — Service (events, helpers, selectors)
+// ------------------------------------------------------------
+// focusEvents is the data foundation for the future Focus hub. Each event
+// is a small, append-only record of something productivity-meaningful: a
+// timer start/stop, a project/task switch, a logged distraction, a window
+// change (only when window tracking is on), a nudge response, a daily
+// closeout. Selectors below let future dashboards roll these up by day,
+// project, or type without bespoke queries scattered through the codebase.
+// ============================================================
+
+// Lightweight in-memory dedup window for window_changed events. The main
+// process already dedups by (app, title) key, but the renderer also guards
+// against rapid duplicates in case multiple polls overlap during a settings
+// change.
+const FOCUS_WIN_DEDUP_MS = 5000;
+let _lastFocusWindowKey = null;
+let _lastFocusWindowTs = 0;
+
+// Snapshot of the current work context. Pure read, no mutation. Used by
+// recordFocusEvent and any future caller (Focus dashboard, AI summaries)
+// that needs to know what was happening when something occurred.
+function getActiveWorkContext(){
+  const t = state.activeTimer;
+  return {
+    projectId: t ? t.projectId : null,
+    taskId: t ? (t.taskId || null) : null,
+    entryId: null,                 // entries are written on stop; no live id
+    timerRunning: !!t,
+    timerStartMs: t ? t.startMs : null
+  };
+}
+
+// Lightweight activity probe. The Nudge service has its own
+// `userIsActive()` that includes a 5-minute interaction window; this one
+// is intentionally simpler so it can be called from anywhere without
+// pulling in the interaction-listener setup.
+function isUserActive(){
+  return !!state.activeTimer;
+}
+
+// Append one focus event. context defaults to the live work context, but
+// callers can pass a frozen snapshot (e.g. End Day commit reads the
+// pre-stop state). Failures here must never break the primary action that
+// triggered the event — wrap in try/catch at every call site if needed.
+function recordFocusEvent(type, context, metadata){
+  try {
+    const ctx = context || getActiveWorkContext();
+    const ev = {
+      id: nextId('fe'),
+      type,
+      ts: Date.now(),
+      projectId: ctx.projectId || null,
+      taskId: ctx.taskId || null,
+      entryId: ctx.entryId || null,
+      appName: ctx.appName || null,
+      windowTitle: ctx.windowTitle || null,
+      source: ctx.source || 'automatic',
+      note: ctx.note || '',
+      metadata: metadata || {},
+      createdAt: Date.now()
+    };
+    state.focusEvents.push(ev);
+    // Bound the log to keep punch-data.json from ballooning. 10k events ≈
+    // months of normal use; older events drop off the front.
+    if(state.focusEvents.length > 10000){
+      state.focusEvents.splice(0, state.focusEvents.length - 10000);
+    }
+    save();
+    return ev;
+  } catch(err){
+    console.warn('[focus] recordFocusEvent failed', err);
+    return null;
+  }
+}
+
+// ----- Selectors (pure) -----
+
+function getFocusEventsForRange(startMs, endMs){
+  return state.focusEvents.filter(e => e.ts >= startMs && e.ts < endMs);
+}
+function getFocusEventsForDate(dateMs){
+  const { start, end } = dayWindow(dateMs);
+  return getFocusEventsForRange(start, end);
+}
+function getDistractionsForDate(dateMs){
+  return getFocusEventsForDate(dateMs).filter(e => e.type === 'distraction_logged');
+}
+function getTaskSwitchesForDate(dateMs){
+  return getFocusEventsForDate(dateMs).filter(e => e.type === 'task_switched');
+}
+function getProjectSwitchesForDate(dateMs){
+  return getFocusEventsForDate(dateMs).filter(e => e.type === 'project_switched');
+}
+function getWindowActivityForDate(dateMs){
+  return getFocusEventsForDate(dateMs).filter(e => e.type === 'window_changed');
+}
+function getSuggestedFocusHistory(rangeStartMs, rangeEndMs){
+  const events = getFocusEventsForRange(rangeStartMs, rangeEndMs);
+  return events.filter(e =>
+    e.type === 'suggested_focus_shown' ||
+    e.type === 'suggested_focus_accepted' ||
+    e.type === 'suggested_focus_dismissed'
+  );
+}
+
+// Day-level rollup used by the Insights Attention Drift card and any
+// future closeout/AI summary that wants a single object summarizing
+// drift signals.
+function getAttentionDriftSummary(rangeStartMs, rangeEndMs){
+  const events = getFocusEventsForRange(rangeStartMs, rangeEndMs);
+  const counts = {
+    distractions: 0,
+    projectSwitches: 0,
+    taskSwitches: 0,
+    windowChanges: 0,
+    nudgesDone: 0, nudgesSnoozed: 0, nudgesSkipped: 0,
+    suggestedShown: 0, suggestedAccepted: 0, suggestedDismissed: 0
+  };
+  const distractionTypes = new Map();
+  const appUse = new Map();
+  for(const e of events){
+    switch(e.type){
+      case 'distraction_logged':
+        counts.distractions++;
+        const dt = (e.metadata && e.metadata.distractionType) || 'Other';
+        distractionTypes.set(dt, (distractionTypes.get(dt) || 0) + 1);
+        break;
+      case 'project_switched': counts.projectSwitches++; break;
+      case 'task_switched': counts.taskSwitches++; break;
+      case 'window_changed':
+        counts.windowChanges++;
+        if(e.appName) appUse.set(e.appName, (appUse.get(e.appName) || 0) + 1);
+        break;
+      case 'nudge_done': counts.nudgesDone++; break;
+      case 'nudge_snoozed': counts.nudgesSnoozed++; break;
+      case 'nudge_skipped': counts.nudgesSkipped++; break;
+      case 'suggested_focus_shown': counts.suggestedShown++; break;
+      case 'suggested_focus_accepted': counts.suggestedAccepted++; break;
+      case 'suggested_focus_dismissed': counts.suggestedDismissed++; break;
+    }
+  }
+  const mostUsedApp = [...appUse.entries()].sort((a,b) => b[1] - a[1])[0] || null;
+  const topDistraction = [...distractionTypes.entries()].sort((a,b) => b[1] - a[1])[0] || null;
+  return {
+    ...counts,
+    mostUsedApp: mostUsedApp ? { appName: mostUsedApp[0], count: mostUsedApp[1] } : null,
+    topDistractionType: topDistraction ? { type: topDistraction[0], count: topDistraction[1] } : null
+  };
+}
+
+// Dedup gate used by window-tracking event ingress. The same (app, title)
+// landing twice within the dedup window is ignored.
+function focusWindowChangeIsDuplicate(appName, windowTitle){
+  const key = `${appName || ''}::${windowTitle || ''}`;
+  const now = Date.now();
+  if(key === _lastFocusWindowKey && now - _lastFocusWindowTs < FOCUS_WIN_DEDUP_MS){
+    return true;
+  }
+  _lastFocusWindowKey = key;
+  _lastFocusWindowTs = now;
+  return false;
+}
+
+// ============================================================
+// FOCUS SIGNALS — Distraction logger
+// ============================================================
+const DISTRACTION_TYPES = [
+  'Interrupted',
+  'Switched tasks',
+  'Fire drill',
+  'Waiting / blocker',
+  'Forgot what I was doing',
+  'Meeting / presentation',
+  'Personal',
+  'Other'
+];
+let _selectedDistractionType = null;
+
+function renderDistractionButton(){
+  const btn = document.getElementById('btnLogDistraction');
+  if(!btn) return;
+  const f = state.settings.focus || {};
+  btn.classList.toggle('hidden', f.enableDistractionLogging === false);
+}
+
+function openDistractionModal(){
+  const f = state.settings.focus || {};
+  if(f.enableDistractionLogging === false){
+    toast('Enable distraction logging in Settings → Focus Tools');
+    return;
+  }
+  _selectedDistractionType = DISTRACTION_TYPES[0];
+  // Context strip: show what currently links to this distraction so the
+  // user understands what it'll be tagged against.
+  const ctxEl = document.getElementById('distractionContext');
+  const t = state.activeTimer;
+  if(t){
+    const p = getProject(t.projectId);
+    const task = t.taskId ? getTask(t.taskId) : null;
+    const projName = p ? p.name : '(deleted project)';
+    const tail = task ? ` → ${esc(task.name)}` : '';
+    ctxEl.innerHTML = `<span class="distraction-context-dot"></span>Tagging against: <strong>${esc(projName)}</strong>${tail}`;
+    ctxEl.classList.remove('hidden');
+  } else {
+    ctxEl.innerHTML = `<span class="distraction-context-dot off"></span>No active timer — distraction will log without a project/task.`;
+    ctxEl.classList.remove('hidden');
+  }
+  // Type chips
+  const wrap = document.getElementById('distractionTypes');
+  wrap.innerHTML = DISTRACTION_TYPES.map((d, i) => `
+    <button class="distraction-chip${i===0?' selected':''}" data-distraction-type="${esc(d)}">${esc(d)}</button>
+  `).join('');
+  wrap.querySelectorAll('[data-distraction-type]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      _selectedDistractionType = btn.dataset.distractionType;
+      wrap.querySelectorAll('.distraction-chip').forEach(x => x.classList.toggle('selected', x === btn));
+    });
+  });
+  document.getElementById('distractionNote').value = '';
+  openModal('distractionModal');
+  setTimeout(() => document.getElementById('distractionNote').focus(), 50);
+}
+
+function saveDistractionFromModal(){
+  const type = _selectedDistractionType || 'Other';
+  const note = document.getElementById('distractionNote').value.trim();
+  const ctx = { ...getActiveWorkContext(), source: 'manual', note };
+  recordFocusEvent('distraction_logged', ctx, { distractionType: type });
+  closeModal('distractionModal');
+  toast(`Distraction logged: ${type}`);
+}
+
+// ============================================================
+// FOCUS v1 — Activity Rules + Duration Calculation
+// ------------------------------------------------------------
+// Rules are user-defined patterns that classify a (appName, windowTitle)
+// pair into a category (Work / Communication / Distraction / Utility /
+// Break / Custom). They drive the Focus tab's labels, the distraction
+// rollup, and the unlogged-work-detection prompts.
+// ============================================================
+
+const ACTIVITY_CATEGORIES = ['Work','Communication','Distraction','Utility','Break','Custom','Unknown'];
+const ACTIVITY_GAP_CAP_MS = 5 * 60 * 1000;       // any silence ≥ 5min is treated as inactivity, not "still in app"
+
+// Substring match, case-insensitive. Empty/missing pattern matches everything.
+function _patternMatches(pattern, value){
+  if(!pattern) return true;
+  if(!value) return false;
+  return value.toLowerCase().includes(String(pattern).toLowerCase());
+}
+
+// Find the first enabled rule whose match criteria fit. Returns null if
+// no rule matches; callers can treat that as category=Unknown.
+function matchActivityRule(appName, windowTitle){
+  if(!state.settings.focus || state.settings.focus.enableActivityRules === false) return null;
+  const rules = (state.activityRules || []).filter(r => r.enabled !== false);
+  for(const r of rules){
+    let matches = false;
+    if(r.matchType === 'appName'){
+      matches = _patternMatches(r.appNamePattern, appName);
+    } else if(r.matchType === 'windowTitle'){
+      matches = _patternMatches(r.windowTitlePattern, windowTitle);
+    } else { // appAndTitle (default)
+      matches = _patternMatches(r.appNamePattern, appName) && _patternMatches(r.windowTitlePattern, windowTitle);
+    }
+    if(matches) return r;
+  }
+  return null;
+}
+
+function classifyWindowActivity(appName, windowTitle){
+  const rule = matchActivityRule(appName, windowTitle);
+  if(rule){
+    return {
+      label: rule.label || rule.name || appName,
+      category: rule.category || 'Custom',
+      ruleId: rule.id,
+      rule
+    };
+  }
+  return {
+    label: appName || 'Unknown',
+    category: 'Unknown',
+    ruleId: null,
+    rule: null
+  };
+}
+
+// Pair window_changed events with their next-event boundary to derive a
+// duration per "block". Gaps beyond gapCapMinutes get clipped — that's
+// where the user walked away (the next OS-idle interval will have
+// captured it separately). Idle blocks are also subtracted: any
+// idle_started/idle_ended pair that falls inside a window block reduces
+// its credit. Returns array of { start, end, durationMs, appName,
+// windowTitle, label, category, ruleId, timerRunning, projectId, taskId }.
+function calculateActivityBlocks({ startMs, endMs, gapCapMs } = {}){
+  const cap = gapCapMs || ACTIVITY_GAP_CAP_MS;
+  const rangeStart = startMs || 0;
+  const rangeEnd = endMs || Date.now();
+  // Events in range, sorted ascending by ts.
+  const events = state.focusEvents
+    .filter(e => e.ts >= rangeStart && e.ts <= rangeEnd)
+    .slice()
+    .sort((a,b) => a.ts - b.ts);
+  // Build idle intervals for subtraction.
+  const idleIntervals = [];
+  let openIdle = null;
+  for(const e of events){
+    if(e.type === 'idle_started') openIdle = { start: e.ts, end: null };
+    else if(e.type === 'idle_ended'){
+      if(openIdle){ openIdle.end = e.ts; idleIntervals.push(openIdle); openIdle = null; }
+      else idleIntervals.push({ start: rangeStart, end: e.ts });
+    }
+  }
+  if(openIdle){ openIdle.end = rangeEnd; idleIntervals.push(openIdle); }
+
+  function overlapMs(blockStart, blockEnd, intervals){
+    let total = 0;
+    for(const i of intervals){
+      const s = Math.max(blockStart, i.start);
+      const e = Math.min(blockEnd, i.end);
+      if(e > s) total += (e - s);
+    }
+    return total;
+  }
+
+  const wins = events.filter(e => e.type === 'window_changed');
+  const blocks = [];
+  for(let i = 0; i < wins.length; i++){
+    const cur = wins[i];
+    const nextTs = (i + 1 < wins.length) ? wins[i+1].ts : rangeEnd;
+    const rawDuration = nextTs - cur.ts;
+    const duration = Math.min(rawDuration, cap);
+    if(duration <= 0) continue;
+    const blockEnd = cur.ts + duration;
+    const idle = overlapMs(cur.ts, blockEnd, idleIntervals);
+    const credited = duration - idle;
+    if(credited <= 1000) continue;            // <1s after idle subtraction → drop
+    const cls = classifyWindowActivity(cur.appName, cur.windowTitle);
+    blocks.push({
+      start: cur.ts,
+      end: blockEnd,
+      durationMs: credited,
+      appName: cur.appName,
+      windowTitle: cur.windowTitle,
+      label: cls.label,
+      category: cls.category,
+      ruleId: cls.ruleId,
+      timerRunning: !!cur.metadata?.timerRunning || !!cur.timerRunning,
+      projectId: cur.projectId || null,
+      taskId: cur.taskId || null
+    });
+  }
+  return blocks;
+}
+
+// Roll up blocks by a chosen key. groupBy: 'app' | 'label' | 'category' | 'rule'.
+function rollupBlocks(blocks, groupBy){
+  const out = new Map();
+  for(const b of blocks){
+    let key, name, category, ruleId;
+    if(groupBy === 'category'){ key = b.category; name = b.category; category = b.category; }
+    else if(groupBy === 'rule'){ key = b.ruleId || `_app:${b.appName}`; name = b.label; category = b.category; ruleId = b.ruleId; }
+    else if(groupBy === 'app'){ key = b.appName || '(unknown)'; name = b.appName || 'Unknown'; category = b.category; }
+    else { key = b.label; name = b.label; category = b.category; ruleId = b.ruleId; }
+    const e = out.get(key) || { key, name, category, ruleId, durationMs: 0, blocks: 0, timerOverlapMs: 0 };
+    e.durationMs += b.durationMs;
+    e.blocks += 1;
+    if(b.timerRunning) e.timerOverlapMs += b.durationMs;
+    out.set(key, e);
+  }
+  return [...out.values()].sort((a,b) => b.durationMs - a.durationMs);
+}
+
+function getAppSiteUsageForRange(startMs, endMs, groupBy){
+  const blocks = calculateActivityBlocks({ startMs, endMs });
+  return rollupBlocks(blocks, groupBy || 'label');
+}
+
+function getTopDistractionsForRange(startMs, endMs){
+  const blocks = calculateActivityBlocks({ startMs, endMs })
+    .filter(b => b.category === 'Distraction');
+  return rollupBlocks(blocks, 'label');
+}
+
+// Idle summary: total idle time + longest idle block + how much of the
+// idle overlapped a running timer (a strong signal the user forgot to
+// stop the clock).
+function getIdleSummaryForRange(startMs, endMs){
+  const events = state.focusEvents
+    .filter(e => e.ts >= startMs && e.ts <= endMs)
+    .sort((a,b) => a.ts - b.ts);
+  const idleIntervals = [];
+  let openIdle = null;
+  for(const e of events){
+    if(e.type === 'idle_started') openIdle = { start: e.ts, end: null, timerRunningAtStart: !!e.metadata?.timerRunning };
+    else if(e.type === 'idle_ended'){
+      if(openIdle){ openIdle.end = e.ts; idleIntervals.push(openIdle); openIdle = null; }
+    }
+  }
+  if(openIdle){ openIdle.end = endMs; idleIntervals.push(openIdle); }
+
+  // Compute timer-during-idle overlap from the entry/timer history.
+  function durationDuringTimers(blockStart, blockEnd){
+    let total = 0;
+    // Closed entries that overlap the block
+    for(const ent of state.entries){
+      const s = Math.max(blockStart, ent.startMs);
+      const e = Math.min(blockEnd, ent.endMs);
+      if(e > s) total += (e - s);
+    }
+    // Live active timer
+    if(state.activeTimer){
+      const s = Math.max(blockStart, state.activeTimer.startMs);
+      const e = Math.min(blockEnd, Date.now());
+      if(e > s) total += (e - s);
+    }
+    return total;
+  }
+
+  let total = 0, longest = 0, timerOverlap = 0;
+  for(const i of idleIntervals){
+    const d = i.end - i.start;
+    total += d;
+    if(d > longest) longest = d;
+    timerOverlap += durationDuringTimers(i.start, i.end);
+  }
+  return {
+    totalMs: total,
+    longestMs: longest,
+    blockCount: idleIntervals.length,
+    timerDuringIdleMs: timerOverlap
+  };
+}
+
+// Longest uninterrupted activity block in a category. Used by Attention
+// Drift link on Focus.
+function getLongestUninterruptedBlock(startMs, endMs, category){
+  const blocks = calculateActivityBlocks({ startMs, endMs });
+  const filtered = category ? blocks.filter(b => b.category === category) : blocks;
+  return filtered.reduce((max, b) => b.durationMs > (max?.durationMs || 0) ? b : max, null);
+}
+
+function formatDurationMs(ms){
+  if(ms < 60000) return `${Math.round(ms/1000)}s`;
+  const totalMin = Math.round(ms/60000);
+  if(totalMin < 60) return `${totalMin}m`;
+  const h = Math.floor(totalMin/60);
+  const m = totalMin % 60;
+  return m === 0 ? `${h}h` : `${h}h ${m}m`;
+}
+
+// ============================================================
+// FOCUS v1 — Tab renderers
+// ============================================================
+let _focusRange = 'today';
+
+function focusRangeWindow(){
+  const now = Date.now();
+  if(_focusRange === 'thisWeek'){
+    return { start: startOfWeek(now), end: now };
+  }
+  return { start: startOfDay(now), end: now };
+}
+
+function getFocusSummaryForRange(startMs, endMs){
+  const blocks = calculateActivityBlocks({ startMs, endMs });
+  let active = 0, work = 0, comm = 0, distract = 0, util = 0, brk = 0, unknown = 0;
+  for(const b of blocks){
+    active += b.durationMs;
+    if(b.category === 'Work') work += b.durationMs;
+    else if(b.category === 'Communication') comm += b.durationMs;
+    else if(b.category === 'Distraction') distract += b.durationMs;
+    else if(b.category === 'Utility') util += b.durationMs;
+    else if(b.category === 'Break') brk += b.durationMs;
+    else unknown += b.durationMs;
+  }
+  const idle = getIdleSummaryForRange(startMs, endMs);
+  // Unlogged detected count: events of type unlogged_work_detected in range.
+  const unloggedDetectedCount = state.focusEvents.filter(e =>
+    e.type === 'unlogged_work_detected' && e.ts >= startMs && e.ts <= endMs
+  ).length;
+  const unloggedLogged = state.focusEvents.filter(e =>
+    e.type === 'unlogged_work_logged' && e.ts >= startMs && e.ts <= endMs
+  );
+  let unloggedLoggedMs = 0;
+  for(const e of unloggedLogged) unloggedLoggedMs += (e.metadata?.durationMs || 0);
+  // Traction score: (work + communication) / active. Null if active is tiny.
+  const tractionScore = active > 60000
+    ? Math.round(((work + comm) / active) * 100)
+    : null;
+  return {
+    activeMs: active,
+    workMs: work,
+    communicationMs: comm,
+    distractionMs: distract,
+    utilityMs: util,
+    breakMs: brk,
+    unknownMs: unknown,
+    idle,
+    unloggedDetectedCount,
+    unloggedLoggedMs,
+    tractionScore
+  };
+}
+
+function renderFocusTab(){
+  renderFocusSummary();
+  renderAppSiteUsage();
+  renderTopDistractions();
+  renderIdleSummary();
+  renderFocusSuggested();
+  renderRecentFocusEvents();
+  // Range subtitle
+  const lbl = document.getElementById('focusRangeLabel');
+  if(lbl){
+    const { start, end } = focusRangeWindow();
+    const sd = new Date(start).toLocaleDateString();
+    const ed = new Date(end).toLocaleDateString();
+    lbl.textContent = sd === ed ? sd : `${sd} → ${ed}`;
+  }
+}
+
+function renderFocusSummary(){
+  const wrap = document.getElementById('focusSummary');
+  if(!wrap) return;
+  const { start, end } = focusRangeWindow();
+  const s = getFocusSummaryForRange(start, end);
+  const cells = [
+    { label: 'Active', value: formatDurationMs(s.activeMs), sub: 'detected attention time' },
+    { label: 'Work', value: formatDurationMs(s.workMs), sub: '', cls: 'work' },
+    { label: 'Distraction', value: formatDurationMs(s.distractionMs), sub: '', cls: 'distraction' },
+    { label: 'Idle', value: formatDurationMs(s.idle.totalMs), sub: s.idle.timerDuringIdleMs > 0 ? `${formatDurationMs(s.idle.timerDuringIdleMs)} during a timer` : '', cls: 'idle' },
+    { label: 'Unlogged', value: String(s.unloggedDetectedCount), sub: s.unloggedLoggedMs > 0 ? `${formatDurationMs(s.unloggedLoggedMs)} recovered` : 'detected prompts', cls: 'unlogged' },
+    { label: 'Traction', value: s.tractionScore != null ? `${s.tractionScore}%` : '—', sub: 'work + comm / active', cls: 'score' }
+  ];
+  wrap.innerHTML = cells.map(c => `
+    <div class="focus-summary-cell">
+      <div class="focus-summary-label">${esc(c.label)}</div>
+      <div class="focus-summary-value ${c.cls || ''}">${esc(c.value)}</div>
+      ${c.sub ? `<div class="focus-summary-sub">${esc(c.sub)}</div>` : ''}
+    </div>
+  `).join('');
+}
+
+function categoryCss(cat){
+  return (cat || 'unknown').toLowerCase();
+}
+
+function renderUsageList(targetId, rows, totalMs){
+  const wrap = document.getElementById(targetId);
+  if(!wrap) return;
+  if(!rows.length){
+    wrap.innerHTML = '<div class="empty" style="padding:10px 0">No data yet for this range.</div>';
+    return;
+  }
+  const max = Math.max(1, totalMs || rows[0].durationMs);
+  wrap.innerHTML = rows.slice(0, 8).map(r => {
+    const pct = Math.max(2, Math.round((r.durationMs / max) * 100));
+    const catKey = categoryCss(r.category);
+    const timerTag = r.timerOverlapMs > 0
+      ? `<span class="focus-usage-timer-tag" title="time during a running timer">⏱ ${formatDurationMs(r.timerOverlapMs)}</span>`
+      : '';
+    return `
+      <div class="focus-usage-row">
+        <div class="focus-usage-head">
+          <span class="focus-usage-label">${esc(r.name)}</span>
+          <span class="focus-usage-cat ${catKey}">${esc(r.category)}</span>
+        </div>
+        <div class="focus-usage-time">${esc(formatDurationMs(r.durationMs))}${timerTag}</div>
+        <div class="focus-usage-bar"><div class="focus-usage-bar-fill ${catKey}" style="width:${pct}%"></div></div>
+      </div>`;
+  }).join('');
+}
+
+function renderAppSiteUsage(){
+  const { start, end } = focusRangeWindow();
+  const rows = getAppSiteUsageForRange(start, end, 'label');
+  const total = rows.reduce((s, r) => s + r.durationMs, 0);
+  renderUsageList('focusAppUsage', rows, total);
+}
+
+function renderTopDistractions(){
+  const { start, end } = focusRangeWindow();
+  const rows = getTopDistractionsForRange(start, end);
+  const total = rows.reduce((s, r) => s + r.durationMs, 0);
+  renderUsageList('focusDistractions', rows, total);
+}
+
+function renderIdleSummary(){
+  const wrap = document.getElementById('focusIdle');
+  if(!wrap) return;
+  const { start, end } = focusRangeWindow();
+  const idle = getIdleSummaryForRange(start, end);
+  if(idle.blockCount === 0){
+    wrap.innerHTML = '<div class="empty" style="padding:10px 0">No idle blocks detected. (Idle detection runs while the app is open.)</div>';
+    return;
+  }
+  let html = `
+    <div class="focus-idle-row"><span class="focus-idle-label">Total idle</span><span class="focus-idle-value">${esc(formatDurationMs(idle.totalMs))}</span></div>
+    <div class="focus-idle-row"><span class="focus-idle-label">Longest idle block</span><span class="focus-idle-value">${esc(formatDurationMs(idle.longestMs))}</span></div>
+    <div class="focus-idle-row"><span class="focus-idle-label">Idle blocks</span><span class="focus-idle-value">${idle.blockCount}</span></div>
+  `;
+  if(idle.timerDuringIdleMs > 0){
+    html += `<div class="focus-idle-warning">⚠ Timer was running during ${esc(formatDurationMs(idle.timerDuringIdleMs))} of idle time. Consider trimming those entries.</div>`;
+  }
+  wrap.innerHTML = html;
+}
+
+function renderFocusSuggested(){
+  const wrap = document.getElementById('focusSuggested');
+  if(!wrap) return;
+  const s = buildSuggestedFocus(Date.now());
+  if(!s){
+    wrap.innerHTML = '<div class="empty" style="padding:10px 0">All clear — no priority surfaced right now.</div>';
+    return;
+  }
+  const project = s.projectId ? getProject(s.projectId) : null;
+  const task = s.taskId ? getTask(s.taskId) : null;
+  wrap.innerHTML = `
+    <div class="suggested-focus-body">
+      <div class="suggested-focus-title">${esc(project ? project.name : 'Suggested')}${task ? ` <span class="suggested-focus-task">${esc(task.name)}</span>` : ''}</div>
+      <div class="suggested-focus-reason">${esc(s.reason)}</div>
+      <div class="suggested-focus-move"><strong>Next:</strong> ${esc(s.firstMove)}</div>
+    </div>`;
+}
+
+function renderRecentFocusEvents(){
+  const wrap = document.getElementById('focusRecent');
+  if(!wrap) return;
+  const { start, end } = focusRangeWindow();
+  const events = state.focusEvents
+    .filter(e => e.ts >= start && e.ts <= end)
+    .slice(-20)
+    .reverse();
+  if(!events.length){
+    wrap.innerHTML = '<div class="empty" style="padding:10px 0">No focus events captured yet for this range.</div>';
+    return;
+  }
+  wrap.innerHTML = events.map(e => {
+    const time = formatTimeOfDay(e.ts);
+    const detail = buildFocusEventDetail(e);
+    return `
+      <div class="focus-recent-row">
+        <div class="focus-recent-time">${esc(time)}</div>
+        <div class="focus-recent-type">${esc(e.type.replace(/_/g, ' '))}</div>
+        <div class="focus-recent-detail">${detail}</div>
+      </div>`;
+  }).join('');
+}
+
+// ============================================================
+// FOCUS v1 — Activity Rules manager (Settings → Focus Tools)
+// ============================================================
+let _editingRuleId = null;
+
+function renderActivityRulesList(){
+  const wrap = document.getElementById('activityRulesList');
+  if(!wrap) return;
+  const rules = state.activityRules || [];
+  if(!rules.length){
+    wrap.innerHTML = '<div class="empty" style="padding:12px">No rules yet. Add one above, or use "Seed common distraction rules" to start.</div>';
+    return;
+  }
+  wrap.innerHTML = rules.map(r => {
+    const desc = [];
+    if(r.matchType === 'appName') desc.push(`app: <code>${esc(r.appNamePattern || '*')}</code>`);
+    else if(r.matchType === 'windowTitle') desc.push(`title: <code>${esc(r.windowTitlePattern || '*')}</code>`);
+    else desc.push(`app: <code>${esc(r.appNamePattern || '*')}</code> + title: <code>${esc(r.windowTitlePattern || '*')}</code>`);
+    if(r.promptToLog) desc.push(`prompts after ${r.promptAfterMinutes || 30}m`);
+    return `
+      <div class="activity-rule-row">
+        <div class="activity-rule-head">
+          <div class="activity-rule-name">${esc(r.label || r.name)} <span class="focus-usage-cat ${categoryCss(r.category)}">${esc(r.category || 'Custom')}</span></div>
+          <div class="activity-rule-meta">${desc.join(' · ')}</div>
+        </div>
+        <label class="checkbox" title="Enabled">
+          <input type="checkbox" data-rule-toggle="${esc(r.id)}" ${r.enabled !== false ? 'checked' : ''} />
+          <span></span>
+        </label>
+        <button class="icon-btn" data-rule-edit="${esc(r.id)}" title="Edit">✎</button>
+      </div>`;
+  }).join('');
+  wrap.querySelectorAll('[data-rule-toggle]').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const r = state.activityRules.find(x => x.id === cb.dataset.ruleToggle);
+      if(!r) return;
+      r.enabled = cb.checked;
+      r.updatedAt = Date.now();
+      save();
+    });
+  });
+  wrap.querySelectorAll('[data-rule-edit]').forEach(btn => {
+    btn.addEventListener('click', () => openActivityRuleModal(btn.dataset.ruleEdit));
+  });
+}
+
+function openActivityRuleModal(ruleId){
+  _editingRuleId = ruleId || null;
+  const r = ruleId ? state.activityRules.find(x => x.id === ruleId) : null;
+  document.getElementById('activityRuleModalTitle').textContent = r ? 'Edit activity rule' : 'New activity rule';
+  document.getElementById('ruleNameInput').value = r ? (r.name || '') : '';
+  document.getElementById('ruleMatchType').value = r ? (r.matchType || 'appAndTitle') : 'appAndTitle';
+  document.getElementById('ruleCategory').value = r ? (r.category || 'Work') : 'Work';
+  document.getElementById('ruleAppPattern').value = r ? (r.appNamePattern || '') : '';
+  document.getElementById('ruleTitlePattern').value = r ? (r.windowTitlePattern || '') : '';
+  document.getElementById('ruleLabelInput').value = r ? (r.label || '') : '';
+  renderProjectOptions(document.getElementById('ruleDefaultProject'), r ? r.defaultProjectId : null, true);
+  renderSubcatOptions(document.getElementById('ruleDefaultSubcat'), r ? r.defaultProjectId : null, r ? r.defaultSubcategoryId : null);
+  document.getElementById('rulePromptToLog').checked = !!(r && r.promptToLog);
+  document.getElementById('rulePromptAfter').value = r ? (r.promptAfterMinutes || '') : '';
+  document.getElementById('ruleEnabled').checked = r ? (r.enabled !== false) : true;
+  document.getElementById('btnDeleteRuleAdmin').style.display = r ? '' : 'none';
+  openModal('activityRuleModal');
+  setTimeout(() => document.getElementById('ruleNameInput').focus(), 50);
+}
+
+function saveActivityRuleFromModal(){
+  const now = Date.now();
+  const data = {
+    name: document.getElementById('ruleNameInput').value.trim() || 'Untitled rule',
+    matchType: document.getElementById('ruleMatchType').value || 'appAndTitle',
+    category: document.getElementById('ruleCategory').value || 'Custom',
+    appNamePattern: document.getElementById('ruleAppPattern').value.trim(),
+    windowTitlePattern: document.getElementById('ruleTitlePattern').value.trim(),
+    label: document.getElementById('ruleLabelInput').value.trim(),
+    defaultProjectId: document.getElementById('ruleDefaultProject').value || null,
+    defaultSubcategoryId: document.getElementById('ruleDefaultSubcat').value || null,
+    promptToLog: document.getElementById('rulePromptToLog').checked,
+    promptAfterMinutes: parseInt(document.getElementById('rulePromptAfter').value, 10) || null,
+    enabled: document.getElementById('ruleEnabled').checked,
+    updatedAt: now
+  };
+  if(!data.label) data.label = data.name;
+  if(_editingRuleId){
+    const r = state.activityRules.find(x => x.id === _editingRuleId);
+    if(r) Object.assign(r, data);
+  } else {
+    state.activityRules.push({ id: nextId('ar'), createdAt: now, ...data });
+  }
+  save();
+  renderActivityRulesList();
+  closeModal('activityRuleModal');
+  toast(_editingRuleId ? 'Rule updated' : 'Rule added');
+  _editingRuleId = null;
+}
+
+function deleteActivityRuleFromModal(){
+  if(!_editingRuleId) return;
+  if(!confirm('Delete this activity rule? Historical focusEvents will keep the old label they were classified under at the time.')) return;
+  state.activityRules = state.activityRules.filter(x => x.id !== _editingRuleId);
+  save();
+  renderActivityRulesList();
+  closeModal('activityRuleModal');
+  toast('Rule deleted');
+  _editingRuleId = null;
+}
+
+function seedCommonDistractionRules(){
+  const now = Date.now();
+  const presets = [
+    { name: 'YouTube', label: 'YouTube', matchType: 'windowTitle', windowTitlePattern: 'YouTube', category: 'Distraction' },
+    { name: 'Reddit', label: 'Reddit', matchType: 'windowTitle', windowTitlePattern: 'Reddit', category: 'Distraction' },
+    { name: 'Twitter / X', label: 'Twitter / X', matchType: 'windowTitle', windowTitlePattern: '(X) ', category: 'Distraction' },
+    { name: 'Facebook', label: 'Facebook', matchType: 'windowTitle', windowTitlePattern: 'Facebook', category: 'Distraction' },
+    { name: 'Instagram', label: 'Instagram', matchType: 'windowTitle', windowTitlePattern: 'Instagram', category: 'Distraction' },
+    { name: 'TikTok', label: 'TikTok', matchType: 'windowTitle', windowTitlePattern: 'TikTok', category: 'Distraction' }
+  ];
+  let added = 0;
+  for(const p of presets){
+    // Don't add if a rule with the same label already exists.
+    if((state.activityRules || []).some(r => (r.label || '').toLowerCase() === p.label.toLowerCase())) continue;
+    state.activityRules.push({
+      id: nextId('ar'),
+      ...p,
+      appNamePattern: '',
+      enabled: true,
+      promptToLog: false,
+      promptAfterMinutes: null,
+      createdAt: now,
+      updatedAt: now
+    });
+    added++;
+  }
+  save();
+  renderActivityRulesList();
+  toast(added > 0 ? `Added ${added} rule${added === 1 ? '' : 's'}` : 'All presets already exist');
+}
+
+// ============================================================
+// FOCUS v1 — Unlogged Work Detection
+// ------------------------------------------------------------
+// Every minute, examine the trailing window-changed events and look for
+// a continuous run on the same activity label that:
+//   1. matches a rule with promptToLog=true (or default behaviour for
+//      Work/Communication categories)
+//   2. ran for at least promptAfterMinutes (or default 30)
+//   3. has no PUNCH timer overlapping
+//   4. is not currently idle
+//   5. hasn't been prompted for in this same block already
+// If all hold, surface the Unlogged Work modal. Respect global pause /
+// presentation mode like the nudge bring-to-front guard.
+// ============================================================
+let unloggedWorkTickInterval = null;
+let currentUnloggedPrompt = null;   // { ruleId, label, blockStartMs, blockEndMs, durationMs }
+// Map<key, lastPromptedMs> where key = `${ruleId||label}::${blockStartMs}`.
+const _unloggedSuppress = new Map();
+// Per-rule "snoozed until" map. ruleId/label -> ms.
+const _unloggedSnoozeUntil = new Map();
+
+function unloggedDetectionShouldSuppress(){
+  // Respect presentation/pause like other foreground-stealers.
+  if(nudgesGloballyPaused && typeof nudgesGloballyPaused === 'function' && nudgesGloballyPaused()) return true;
+  return false;
+}
+
+function findCurrentActivityBlock(){
+  // Walk window_changed events backward, grouping the trailing run that
+  // shares the same classification label.
+  const wins = state.focusEvents.filter(e => e.type === 'window_changed');
+  if(wins.length === 0) return null;
+  const last = wins[wins.length - 1];
+  const lastCls = classifyWindowActivity(last.appName, last.windowTitle);
+  if(!lastCls.label) return null;
+  // Walk back while the same label persists.
+  let blockStart = last.ts;
+  let firstWin = last;
+  for(let i = wins.length - 2; i >= 0; i--){
+    const w = wins[i];
+    const cls = classifyWindowActivity(w.appName, w.windowTitle);
+    if(cls.label === lastCls.label && cls.ruleId === lastCls.ruleId){
+      blockStart = w.ts;
+      firstWin = w;
+      continue;
+    }
+    break;
+  }
+  return {
+    label: lastCls.label,
+    category: lastCls.category,
+    ruleId: lastCls.ruleId,
+    rule: lastCls.rule,
+    appName: last.appName,
+    windowTitle: last.windowTitle,
+    blockStartMs: blockStart,
+    blockEndMs: Date.now(),
+    durationMs: Date.now() - blockStart,
+    firstWinEventId: firstWin.id
+  };
+}
+
+function timerOverlapsBlock(block){
+  // Closed entries
+  for(const e of state.entries){
+    if(e.endMs > block.blockStartMs && e.startMs < block.blockEndMs) return true;
+  }
+  if(state.activeTimer){
+    if(state.activeTimer.startMs < block.blockEndMs) return true;
+  }
+  return false;
+}
+
+function userIsIdleNow(){
+  // Look at the most recent idle_started/idle_ended pair — if started
+  // more recently than ended (or no end yet), user is currently idle.
+  let lastStart = 0, lastEnd = 0;
+  for(const e of state.focusEvents){
+    if(e.type === 'idle_started') lastStart = Math.max(lastStart, e.ts);
+    else if(e.type === 'idle_ended') lastEnd = Math.max(lastEnd, e.ts);
+  }
+  return lastStart > lastEnd;
+}
+
+function tickUnloggedWorkDetection(){
+  const f = state.settings.focus || {};
+  if(f.enableUnloggedWorkDetection === false) return;
+  if(currentUnloggedPrompt) return;             // a prompt is already open
+  if(state.activeTimer) return;                 // timer running → nothing to detect
+  if(unloggedDetectionShouldSuppress()) return;
+  if(userIsIdleNow()) return;
+  const block = findCurrentActivityBlock();
+  if(!block) return;
+  // Skip Distraction / Unknown unless explicitly opted-in. v1 keeps it
+  // strict: only categories that look like real work.
+  if(block.category !== 'Work' && block.category !== 'Communication') return;
+  // Require an explicit promptToLog flag on the rule OR the global default
+  // for any work/communication rule.
+  const rule = block.rule;
+  if(rule && rule.promptToLog === false) return;
+  // Threshold: rule's setting wins if present, else global default.
+  const thresholdMin = (rule && rule.promptAfterMinutes) || f.defaultUnloggedPromptMinutes || 30;
+  if(block.durationMs < thresholdMin * 60 * 1000) return;
+  // Per-block suppression: don't prompt twice for the same block.
+  const key = `${rule?.id || block.label}::${block.blockStartMs}`;
+  if(_unloggedSuppress.has(key)) return;
+  // Per-rule snooze.
+  const snoozeKey = rule?.id || block.label;
+  const snoozeUntil = _unloggedSnoozeUntil.get(snoozeKey) || 0;
+  if(Date.now() < snoozeUntil) return;
+  // Trigger.
+  _unloggedSuppress.set(key, Date.now());
+  openUnloggedWorkPrompt(block);
+  recordFocusEvent('unlogged_work_detected', {
+    projectId: rule?.defaultProjectId || null,
+    taskId: rule?.defaultTaskId || null
+  }, {
+    label: block.label,
+    appName: block.appName,
+    windowTitle: block.windowTitle,
+    durationMs: block.durationMs,
+    blockStartMs: block.blockStartMs,
+    ruleId: rule?.id || null
+  });
+}
+
+function startUnloggedWorkScheduler(){
+  stopUnloggedWorkScheduler();
+  unloggedWorkTickInterval = setInterval(tickUnloggedWorkDetection, 60 * 1000);
+}
+function stopUnloggedWorkScheduler(){
+  if(unloggedWorkTickInterval) clearInterval(unloggedWorkTickInterval);
+  unloggedWorkTickInterval = null;
+}
+
+function openUnloggedWorkPrompt(block){
+  currentUnloggedPrompt = block;
+  document.getElementById('unloggedPromptLabel').textContent = block.label;
+  document.getElementById('unloggedPromptDuration').textContent =
+    `${formatDurationMs(block.durationMs)} in this block — started at ${formatTimeOfDay(block.blockStartMs)}`;
+  document.getElementById('unloggedPromptSub').textContent =
+    block.appName ? `Detected in ${block.appName}` : 'Detected from window activity';
+  // Pre-pick the rule's default project; allow override.
+  const sel = document.getElementById('unloggedProjectSel');
+  const defaultPid = block.rule?.defaultProjectId || null;
+  renderProjectOptions(sel, defaultPid, false);
+  // Bring Punch to the front so the user actually sees the prompt — this
+  // is similar to nudge bring-to-front behavior.
+  try { window.punch.bringToFrontForNudge(); } catch(_){}
+  openModal('unloggedWorkModal');
+}
+
+function closeUnloggedPrompt(){
+  closeModal('unloggedWorkModal');
+  currentUnloggedPrompt = null;
+}
+
+function handleUnloggedLog(){
+  if(!currentUnloggedPrompt) return;
+  const block = currentUnloggedPrompt;
+  const sel = document.getElementById('unloggedProjectSel');
+  const projectId = sel.value || block.rule?.defaultProjectId || (state.projects[0] && state.projects[0].id);
+  if(!projectId){ toast('Add a project first'); return; }
+  const subcategoryId = block.rule?.defaultSubcategoryId || null;
+  const accountId = null;
+  const taskId = block.rule?.defaultTaskId || null;
+  const entry = {
+    id: nextId('e'),
+    projectId, subcategoryId, accountId,
+    notes: `Detected active work in ${block.label}`,
+    taskId,
+    billable: false,
+    startMs: block.blockStartMs,
+    endMs: block.blockEndMs,
+    createdAt: Date.now(),
+    source: 'detected_unlogged_work',
+    metadata: {
+      detectedLabel: block.label,
+      detectedAppName: block.appName,
+      detectedWindowTitle: block.windowTitle || null,
+      activityRuleId: block.rule?.id || null
+    }
+  };
+  state.entries.push(entry);
+  save(); renderAll();
+  recordFocusEvent('unlogged_work_logged', { projectId, taskId, entryId: entry.id }, {
+    label: block.label,
+    durationMs: block.durationMs,
+    ruleId: block.rule?.id || null
+  });
+  toast(`Logged ${formatDurationMs(block.durationMs)} of ${block.label}`);
+  closeUnloggedPrompt();
+}
+
+function handleUnloggedIgnore(){
+  if(!currentUnloggedPrompt) return;
+  recordFocusEvent('unlogged_work_ignored', {}, {
+    label: currentUnloggedPrompt.label,
+    durationMs: currentUnloggedPrompt.durationMs,
+    ruleId: currentUnloggedPrompt.rule?.id || null
+  });
+  closeUnloggedPrompt();
+}
+
+function handleUnloggedSnooze(){
+  if(!currentUnloggedPrompt) return;
+  const minutes = 15;
+  const until = Date.now() + minutes * 60 * 1000;
+  _unloggedSnoozeUntil.set(currentUnloggedPrompt.rule?.id || currentUnloggedPrompt.label, until);
+  recordFocusEvent('unlogged_work_snoozed', {}, {
+    label: currentUnloggedPrompt.label,
+    snoozeMinutes: minutes,
+    ruleId: currentUnloggedPrompt.rule?.id || null
+  });
+  toast(`Snoozed ${minutes} min`);
+  closeUnloggedPrompt();
+}
+
+function handleUnloggedDontAsk(){
+  if(!currentUnloggedPrompt) return;
+  const rule = currentUnloggedPrompt.rule;
+  if(rule){
+    rule.promptToLog = false;
+    rule.updatedAt = Date.now();
+    save();
+    toast(`"${rule.label}" will no longer prompt`);
+    renderActivityRulesList();
+  } else {
+    // No rule — set a long snooze keyed by label so we won't re-prompt this session.
+    _unloggedSnoozeUntil.set(currentUnloggedPrompt.label, Date.now() + 24 * 60 * 60 * 1000);
+    toast('Won\'t ask for this label today');
+  }
+  closeUnloggedPrompt();
+}
+
+function buildFocusEventDetail(e){
+  const project = e.projectId ? getProject(e.projectId) : null;
+  const task = e.taskId ? getTask(e.taskId) : null;
+  const projTask = [project?.name, task?.name].filter(Boolean).join(' › ');
+  if(e.type === 'window_changed'){
+    return esc(e.windowTitle ? `${e.appName} — ${e.windowTitle}` : (e.appName || ''));
+  }
+  if(e.type === 'distraction_logged'){
+    return esc([(e.metadata?.distractionType || ''), e.note, projTask].filter(Boolean).join(' · '));
+  }
+  if(e.type === 'unlogged_work_detected' || e.type === 'unlogged_work_logged' ||
+     e.type === 'unlogged_work_ignored' || e.type === 'unlogged_work_snoozed'){
+    const dur = e.metadata?.durationMs ? formatDurationMs(e.metadata.durationMs) : '';
+    return esc([(e.metadata?.label || ''), dur].filter(Boolean).join(' · '));
+  }
+  if(e.type === 'timer_stopped'){
+    const dur = e.metadata?.durationMs ? formatDurationMs(e.metadata.durationMs) : '';
+    return esc([projTask, dur].filter(Boolean).join(' · '));
+  }
+  return esc(projTask);
+}
+
+// ============================================================
+// FOCUS SIGNALS — Suggested Focus (rule-based)
+// ------------------------------------------------------------
+// Lightweight planner that surfaces the most worth-starting work item.
+// Pure data: returns null when nothing is worth suggesting (e.g. a clean
+// slate). The card UI hides itself when null. Order matches the priority
+// list in the spec — first matching signal wins.
+// ============================================================
+function buildSuggestedFocus(dateMs){
+  const day = dateMs || Date.now();
+  const todayStart = startOfDay(day);
+  const tomorrowStart = todayStart + 86400000;
+  const hour = new Date(day).getHours();
+
+  // 1. Missing notes after 14:00 if ≥3 today — context decay starts as the
+  //    day winds down and notes get harder to recover.
+  const missingNotes = getMissingNoteEntries(day);
+  if(missingNotes.length >= 3 && hour >= 14){
+    return {
+      type: 'missing_notes',
+      projectId: null,
+      taskId: null,
+      reason: `${missingNotes.length} entries from today are missing context.`,
+      firstMove: 'Open the Log tab and add quick notes before End Day.',
+      confidence: 'high',
+      metadata: { missingCount: missingNotes.length }
+    };
+  }
+
+  const active = state.tasks.filter(isTaskActive);
+  const prioRank = (p) => p === 'high' ? 3 : p === 'normal' ? 2 : p === 'low' ? 1 : 0;
+
+  // Helper to wrap a task into the suggestion shape.
+  const fromTask = (t, type, reason, firstMove, extra) => ({
+    type,
+    projectId: taskPrimaryProject(t),
+    taskId: t.id,
+    reason,
+    firstMove,
+    confidence: 'high',
+    metadata: { taskName: t.name, ...(extra || {}) }
+  });
+
+  // 2. Overdue + high-priority active task.
+  const overdueHigh = active
+    .filter(t => t.dueDate && t.dueDate < todayStart && t.priority === 'high')
+    .sort((a,b) => a.dueDate - b.dueDate);
+  if(overdueHigh[0]){
+    const t = overdueHigh[0];
+    return fromTask(t, 'overdue_priority',
+      `Overdue high-priority task on ${getProject(taskPrimaryProject(t))?.name || 'a project'}.`,
+      'Start the timer and aim for one solid 25-minute block.'
+    );
+  }
+
+  // 3. Due today, highest priority first.
+  const dueToday = active
+    .filter(t => t.dueDate && t.dueDate >= todayStart && t.dueDate < tomorrowStart)
+    .sort((a,b) => prioRank(b.priority) - prioRank(a.priority));
+  if(dueToday[0]){
+    const t = dueToday[0];
+    return fromTask(t, 'due_today',
+      `Due today${t.priority === 'high' ? ' · high priority' : ''}.`,
+      "Open the task and start the timer. 25 minutes will tell you if it's a same-day finish."
+    );
+  }
+
+  // 4. Carry-forward count ≥ 2 — tasks that keep slipping.
+  const slipping = active
+    .filter(t => (t.carryForwardCount || 0) >= 2)
+    .sort((a,b) => (b.carryForwardCount || 0) - (a.carryForwardCount || 0));
+  if(slipping[0]){
+    const t = slipping[0];
+    return fromTask(t, 'carried_forward',
+      `Carried forward ${t.carryForwardCount} times. Reduce the unknowns.`,
+      'Open the task and work for 15 minutes — even a small dent shrinks the friction.',
+      { carryForwardCount: t.carryForwardCount }
+    );
+  }
+
+  // 5. Time logged today but task not yet completed (in-progress momentum).
+  const idsWithTimeToday = new Set();
+  for(const e of state.entries){
+    if(!e.taskId) continue;
+    if(e.endMs > todayStart) idsWithTimeToday.add(e.taskId);
+  }
+  if(state.activeTimer && state.activeTimer.taskId){
+    idsWithTimeToday.add(state.activeTimer.taskId);
+  }
+  const inFlight = active
+    .filter(t => idsWithTimeToday.has(t.id))
+    .sort((a,b) => prioRank(b.priority) - prioRank(a.priority));
+  if(inFlight[0]){
+    const t = inFlight[0];
+    return fromTask(t, 'in_progress',
+      "You've already put time into this today — finish what's started.",
+      'Resume the task and aim to close it before End Day.'
+    );
+  }
+
+  // 6. Highest-priority active task with a due date.
+  const prioritized = active
+    .filter(t => t.dueDate && t.priority)
+    .sort((a,b) => {
+      const r = prioRank(b.priority) - prioRank(a.priority);
+      return r !== 0 ? r : a.dueDate - b.dueDate;
+    });
+  if(prioritized[0]){
+    const t = prioritized[0];
+    return fromTask(t, 'top_priority',
+      `Highest-priority active task with a deadline.`,
+      'Start now while the day is fresh.'
+    );
+  }
+
+  return null; // 7. Fallback handled by the renderer with an "all clear" message.
+}
+
+// Session-scoped guard so we don't log suggested_focus_shown on every render
+// for the same recommendation. Reset only when the suggestion changes.
+let _lastSuggestedFocusKey = null;
+
+function suggestedFocusKey(s){
+  if(!s) return 'none';
+  return `${s.type}::${s.taskId || ''}::${s.projectId || ''}`;
+}
+
+function renderSuggestedFocusCard(){
+  const wrap = document.getElementById('suggestedFocus');
+  if(!wrap) return;
+  const f = state.settings.focus || {};
+  if(f.enableSuggestedFocus === false){
+    wrap.classList.add('hidden');
+    wrap.innerHTML = '';
+    return;
+  }
+  const s = buildSuggestedFocus(Date.now());
+  // "All clear" fallback — keep the section visible but small.
+  if(!s){
+    wrap.classList.remove('hidden');
+    wrap.innerHTML = `
+      <div class="suggested-focus-head">
+        <span class="suggested-focus-label">Suggested focus</span>
+        <span class="suggested-focus-confidence">all clear</span>
+      </div>
+      <div class="suggested-focus-body">
+        <div class="suggested-focus-title">No clear priority — pick whatever you want.</div>
+        <div class="suggested-focus-reason">No overdue or due-today tasks, no slipping tasks, no in-flight work waiting.</div>
+      </div>`;
+    _lastSuggestedFocusKey = 'none';
+    return;
+  }
+  wrap.classList.remove('hidden');
+  const project = s.projectId ? getProject(s.projectId) : null;
+  const task = s.taskId ? getTask(s.taskId) : null;
+  const projectName = project ? project.name : (s.type === 'missing_notes' ? 'Today\'s notes' : 'Suggested');
+  const taskName = task ? task.name : null;
+  const accentColor = project ? project.color : 'var(--amber)';
+  const showStartTimer = !!task;
+  const showViewTask = !!task;
+  wrap.innerHTML = `
+    <div class="suggested-focus-head">
+      <span class="suggested-focus-bar" style="background:${esc(accentColor)}"></span>
+      <span class="suggested-focus-label">Suggested focus</span>
+      <span class="suggested-focus-confidence">${esc(s.confidence || 'medium')}</span>
+    </div>
+    <div class="suggested-focus-body">
+      <div class="suggested-focus-title">${esc(projectName)}${taskName ? ` <span class="suggested-focus-task">${esc(taskName)}</span>` : ''}</div>
+      <div class="suggested-focus-reason">${esc(s.reason)}</div>
+      <div class="suggested-focus-move"><strong>Next:</strong> ${esc(s.firstMove)}</div>
+    </div>
+    <div class="suggested-focus-actions">
+      ${showStartTimer ? `<button class="btn btn-primary" data-suggested-action="start">Start timer</button>` : ''}
+      ${showViewTask ? `<button class="btn" data-suggested-action="view">View task</button>` : ''}
+      <button class="btn" data-suggested-action="dismiss">Dismiss</button>
+    </div>`;
+
+  // Log shown event only on transitions to a new suggestion to avoid noise.
+  const key = suggestedFocusKey(s);
+  if(_lastSuggestedFocusKey !== key){
+    _lastSuggestedFocusKey = key;
+    recordFocusEvent('suggested_focus_shown', {
+      projectId: s.projectId, taskId: s.taskId
+    }, { type: s.type, reason: s.reason });
+  }
+
+  wrap.querySelectorAll('[data-suggested-action]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const action = btn.dataset.suggestedAction;
+      if(action === 'start' && s.taskId){
+        recordFocusEvent('suggested_focus_accepted', {
+          projectId: s.projectId, taskId: s.taskId
+        }, { type: s.type, action: 'start' });
+        startTimerForTask(s.taskId, s.projectId || undefined);
+      } else if(action === 'view' && s.taskId){
+        recordFocusEvent('suggested_focus_accepted', {
+          projectId: s.projectId, taskId: s.taskId
+        }, { type: s.type, action: 'view' });
+        openTaskModal(s.taskId);
+      } else if(action === 'dismiss'){
+        recordFocusEvent('suggested_focus_dismissed', {
+          projectId: s.projectId, taskId: s.taskId
+        }, { type: s.type });
+        // Hide for the rest of this session — re-renders won't bring it back
+        // until the suggestion key actually changes.
+        wrap.classList.add('hidden');
+      }
+    });
+  });
+}
+
 // ------------------------------------------------------------
 // Insights tab
 // ------------------------------------------------------------
@@ -2905,6 +4386,45 @@ function renderInsights(){
   renderInsightsCarryForward(data.carryForward);
   renderInsightsCloseouts();
   renderInsightsQuality(data, range);
+  renderAttentionDriftCard();
+}
+
+// Compact today-only focus signals card. The range above covers a week+,
+// but attention drift is most actionable when it's about the day in front
+// of you — keep it focused on today.
+function renderAttentionDriftCard(){
+  const wrap = document.getElementById('attentionDrift');
+  if(!wrap) return;
+  const today = Date.now();
+  const { start, end } = dayWindow(today);
+  const summary = getAttentionDriftSummary(start, end);
+  const noSignals =
+    summary.distractions === 0 &&
+    summary.projectSwitches === 0 &&
+    summary.taskSwitches === 0 &&
+    summary.windowChanges === 0 &&
+    summary.suggestedShown === 0;
+  if(noSignals){
+    wrap.innerHTML = '<div class="empty" style="padding:18px">No focus signals captured today yet. Enable app/window tracking in Settings → Focus Tools, or log distractions as they happen.</div>';
+    return;
+  }
+  const acceptRate = summary.suggestedShown > 0
+    ? Math.round((summary.suggestedAccepted / summary.suggestedShown) * 100)
+    : null;
+  const cells = [
+    { label: 'Distractions', value: summary.distractions, sub: summary.topDistractionType ? `top: ${summary.topDistractionType.type}` : '' },
+    { label: 'Project switches', value: summary.projectSwitches, sub: '' },
+    { label: 'Task switches', value: summary.taskSwitches, sub: '' },
+    { label: 'Most-used app', value: summary.mostUsedApp ? summary.mostUsedApp.appName : '—', sub: summary.mostUsedApp ? `${summary.mostUsedApp.count} switches` : 'tracking off' },
+    { label: 'Suggested accept', value: acceptRate != null ? `${acceptRate}%` : '—', sub: summary.suggestedShown ? `${summary.suggestedAccepted}/${summary.suggestedShown}` : '' }
+  ];
+  wrap.innerHTML = cells.map(c => `
+    <div class="drift-cell">
+      <div class="drift-label">${esc(c.label)}</div>
+      <div class="drift-value">${esc(String(c.value))}</div>
+      ${c.sub ? `<div class="drift-sub">${esc(c.sub)}</div>` : ''}
+    </div>
+  `).join('');
 }
 
 function renderInsightsKpis(data, range){
@@ -3169,27 +4689,36 @@ function closeNudgePopup(){
 
 function handleNudgeDone(){
   if(!currentNudgePopup) return;
-  recordNudgeResponse(currentNudgePopup.eventId, 'done');
+  const popupInfo = currentNudgePopup;
+  recordNudgeResponse(popupInfo.eventId, 'done');
   toast('Logged');
   closeNudgePopup();
+  recordFocusEvent('nudge_done', getActiveWorkContext(),
+    { nudgeId: popupInfo.nudgeId, nudgeEventId: popupInfo.eventId });
 }
 
 function handleNudgeSnooze(){
   if(!currentNudgePopup) return;
-  const nudge = state.nudges.find(n => n.id === currentNudgePopup.nudgeId);
+  const popupInfo = currentNudgePopup;
+  const nudge = state.nudges.find(n => n.id === popupInfo.nudgeId);
   if(!nudge){ closeNudgePopup(); return; }
   const mins = nudge.defaultSnoozeMinutes || 15;
   const until = Date.now() + mins * 60 * 1000;
   nudge.snoozeUntil = until;
-  recordNudgeResponse(currentNudgePopup.eventId, 'snoozed', { snoozeUntil: until, snoozeMinutes: mins });
+  recordNudgeResponse(popupInfo.eventId, 'snoozed', { snoozeUntil: until, snoozeMinutes: mins });
   toast(`Snoozed ${mins} min`);
   closeNudgePopup();
+  recordFocusEvent('nudge_snoozed', getActiveWorkContext(),
+    { nudgeId: popupInfo.nudgeId, nudgeEventId: popupInfo.eventId, snoozeMinutes: mins });
 }
 
 function handleNudgeSkip(){
   if(!currentNudgePopup) return;
-  recordNudgeResponse(currentNudgePopup.eventId, 'skipped');
+  const popupInfo = currentNudgePopup;
+  recordNudgeResponse(popupInfo.eventId, 'skipped');
   closeNudgePopup();
+  recordFocusEvent('nudge_skipped', getActiveWorkContext(),
+    { nudgeId: popupInfo.nudgeId, nudgeEventId: popupInfo.eventId });
 }
 
 // ----- Settings manager (list + add + edit + delete + pause + presentation) -----
@@ -3248,20 +4777,23 @@ function renderNudgeManager(){
 // Tiny status line so the user always knows the global pause state.
 function renderNudgePauseStatus(){
   const el = document.getElementById('nudgePauseStatus');
-  if(!el) return;
-  const p = state.settings.productivity || {};
-  if(p.presentationModeEnabled){
-    el.textContent = 'Presentation mode is ON — nudges suppressed.';
-    el.className = 'hint-text nudge-pause-status active';
-  } else if(p.nudgePauseUntil && p.nudgePauseUntil > Date.now()){
-    el.textContent = `Paused until ${new Date(p.nudgePauseUntil).toLocaleString()}.`;
-    el.className = 'hint-text nudge-pause-status active';
-  } else {
-    el.textContent = 'Nudges active.';
-    el.className = 'hint-text nudge-pause-status';
+  if(el){
+    const p = state.settings.productivity || {};
+    if(p.presentationModeEnabled){
+      el.textContent = 'Presentation mode is ON — nudges suppressed.';
+      el.className = 'hint-text nudge-pause-status active';
+    } else if(p.nudgePauseUntil && p.nudgePauseUntil > Date.now()){
+      el.textContent = `Paused until ${new Date(p.nudgePauseUntil).toLocaleString()}.`;
+      el.className = 'hint-text nudge-pause-status active';
+    } else {
+      el.textContent = 'Nudges active.';
+      el.className = 'hint-text nudge-pause-status';
+    }
+    const presEl = document.getElementById('presentationToggle');
+    if(presEl) presEl.checked = !!(state.settings.productivity || {}).presentationModeEnabled;
   }
-  const presEl = document.getElementById('presentationToggle');
-  if(presEl) presEl.checked = !!p.presentationModeEnabled;
+  // Keep the Today snapshot pill in sync with the same state.
+  renderNudgeStatusPill();
 }
 
 function pauseNudges(durationMs){
@@ -3677,6 +5209,26 @@ function applyProductivitySettings(){
   }
   const pres = document.getElementById('presentationToggle');
   if(pres) pres.checked = !!p.presentationModeEnabled;
+  const btf = document.getElementById('bringToFrontToggle');
+  if(btf) btf.checked = p.bringToFrontForNudges !== false;
+  // Focus settings inputs — populated from state.settings.focus.
+  const f = state.settings.focus || (state.settings.focus = defaultFocusSettings());
+  const fwe = document.getElementById('focusEnableWindowTracking');
+  if(fwe) fwe.checked = !!f.enableWindowTracking;
+  const fwt = document.getElementById('focusTrackTitles');
+  if(fwt) fwt.checked = !!f.trackWindowTitles;
+  const fwi = document.getElementById('focusInterval');
+  if(fwi) fwi.value = f.windowTrackingIntervalSeconds || 30;
+  const fse = document.getElementById('focusEnableSuggested');
+  if(fse) fse.checked = f.enableSuggestedFocus !== false;
+  const fde = document.getElementById('focusEnableDistractions');
+  if(fde) fde.checked = f.enableDistractionLogging !== false;
+  const far = document.getElementById('focusEnableActivityRules');
+  if(far) far.checked = f.enableActivityRules !== false;
+  const fuw = document.getElementById('focusEnableUnloggedWork');
+  if(fuw) fuw.checked = f.enableUnloggedWorkDetection !== false;
+  const fum = document.getElementById('focusUnloggedMinutes');
+  if(fum) fum.value = f.defaultUnloggedPromptMinutes || 30;
   renderNudgePauseStatus();
 }
 async function applyHotkey(){
@@ -3776,8 +5328,19 @@ function applyAutodetect(){
 // ------------------------------------------------------------
 // Idle
 // ------------------------------------------------------------
-function onIdleStart(info){ if(!state.activeTimer) return; idleTimerSnapshot={idleSinceMs:info.idleSinceMs,activeTimerStartMs:state.activeTimer.startMs}; }
+function onIdleStart(info){
+  // Always record idle_started for Focus accounting, regardless of timer
+  // state. Carries `timerRunning` so Focus can flag idle-during-timer.
+  recordFocusEvent('idle_started', { ...getActiveWorkContext(), source: 'system' }, {
+    idleSinceMs: info.idleSinceMs,
+    idleSec: info.idleSec,
+    timerRunning: !!state.activeTimer
+  });
+  if(!state.activeTimer) return;
+  idleTimerSnapshot={idleSinceMs:info.idleSinceMs,activeTimerStartMs:state.activeTimer.startMs};
+}
 function onIdleEnd(){
+  recordFocusEvent('idle_ended', { source: 'system' }, { nowMs: Date.now() });
   if(!idleTimerSnapshot||!state.activeTimer){ idleTimerSnapshot=null; return; }
   if(state.activeTimer.startMs!==idleTimerSnapshot.activeTimerStartMs){ idleTimerSnapshot=null; return; }
   document.getElementById('idleDuration').textContent=formatHMS(Date.now()-idleTimerSnapshot.idleSinceMs);
@@ -3812,6 +5375,50 @@ function attachIPCListeners(){
   window.punch.onIdleStart(onIdleStart);
   window.punch.onIdleEnd(onIdleEnd);
   window.punch.onUpdateStatus(renderUpdateStatus);
+  window.punch.onFocusWindowChanged(onFocusWindowChanged);
+}
+
+// Bridge for the focus-tracking poll: receive (appName, windowTitle, ts)
+// from main and persist one window_changed focusEvent. Dedup at the
+// renderer side guards against any rapid duplicates if the main process
+// is restarting its poll during a settings change.
+function onFocusWindowChanged({ appName, windowTitle, ts }){
+  if(focusWindowChangeIsDuplicate(appName, windowTitle)) return;
+  const ctx = { ...getActiveWorkContext(), appName, windowTitle: windowTitle || null };
+  recordFocusEvent('window_changed', ctx);
+}
+
+// Lifecycle helpers — called from applyFocusSettings whenever the user
+// toggles tracking or changes the interval/title-capture. Centralized so
+// init and the settings handlers don't drift.
+function startWindowTracking(){
+  const f = state.settings.focus || (state.settings.focus = defaultFocusSettings());
+  if(!f.enableWindowTracking) return;
+  window.punch.startFocusTracking({
+    intervalSec: f.windowTrackingIntervalSeconds || 30,
+    trackTitles: !!f.trackWindowTitles
+  });
+}
+function stopWindowTracking(){
+  window.punch.stopFocusTracking();
+}
+function applyFocusSettings(){
+  const f = state.settings.focus || (state.settings.focus = defaultFocusSettings());
+  if(f.enableWindowTracking){
+    // Restart with current params so live edits to interval/title-capture
+    // take effect without an app restart.
+    stopWindowTracking();
+    startWindowTracking();
+  } else {
+    stopWindowTracking();
+  }
+  // Unlogged work scheduler: only meaningful when window tracking is on
+  // (no window_changed events otherwise, no signal to detect).
+  if(f.enableUnloggedWorkDetection && f.enableWindowTracking){
+    startUnloggedWorkScheduler();
+  } else {
+    stopUnloggedWorkScheduler();
+  }
 }
 
 // ------------------------------------------------------------
@@ -3836,6 +5443,37 @@ function bindUI(){
   });
   document.getElementById('btnExpand').addEventListener('click',toggleMode);
   document.getElementById('btnMinimize').addEventListener('click',()=>window.punch.minimize());
+  const distractBtn = document.getElementById('btnLogDistraction');
+  if(distractBtn) distractBtn.addEventListener('click', openDistractionModal);
+  const saveDistract = document.getElementById('btnSaveDistraction');
+  if(saveDistract) saveDistract.addEventListener('click', saveDistractionFromModal);
+
+  // Activity rules manager
+  const addRuleBtn = document.getElementById('btnAddActivityRule');
+  if(addRuleBtn) addRuleBtn.addEventListener('click', () => openActivityRuleModal(null));
+  const seedRulesBtn = document.getElementById('btnSeedActivityRules');
+  if(seedRulesBtn) seedRulesBtn.addEventListener('click', seedCommonDistractionRules);
+  const saveRuleBtn = document.getElementById('btnSaveActivityRule');
+  if(saveRuleBtn) saveRuleBtn.addEventListener('click', saveActivityRuleFromModal);
+  const delRuleBtn = document.getElementById('btnDeleteRuleAdmin');
+  if(delRuleBtn) delRuleBtn.addEventListener('click', deleteActivityRuleFromModal);
+  // Rule modal: refresh subcat dropdown when project changes
+  const ruleProjectSel = document.getElementById('ruleDefaultProject');
+  if(ruleProjectSel){
+    ruleProjectSel.addEventListener('change', () => {
+      renderSubcatOptions(document.getElementById('ruleDefaultSubcat'), ruleProjectSel.value, null);
+    });
+  }
+
+  // Unlogged work prompt actions
+  const unlogBtn  = document.getElementById('btnUnloggedLog');
+  const unsnzBtn  = document.getElementById('btnUnloggedSnooze');
+  const unignBtn  = document.getElementById('btnUnloggedIgnore');
+  const undontBtn = document.getElementById('btnUnloggedDontAsk');
+  if(unlogBtn)  unlogBtn.addEventListener('click', handleUnloggedLog);
+  if(unsnzBtn)  unsnzBtn.addEventListener('click', handleUnloggedSnooze);
+  if(unignBtn)  unignBtn.addEventListener('click', handleUnloggedIgnore);
+  if(undontBtn) undontBtn.addEventListener('click', handleUnloggedDontAsk);
   document.getElementById('btnClose').addEventListener('click',()=>window.punch.hide());
   document.getElementById('btnPin').classList.toggle('active',state.settings.alwaysOnTop);
   document.getElementById('btnMiniMode').addEventListener('click', toggleMiniMode);
@@ -3899,6 +5537,41 @@ document.getElementById('miniTimer').addEventListener('click', exitMiniMode);
       document.querySelector(`.tab-pane[data-pane="${t.dataset.tab}"]`).classList.add('active');
       // Insights is computed on demand — refresh whenever the user lands on it.
       if(t.dataset.tab === 'insights') renderInsights();
+      if(t.dataset.tab === 'focus') renderFocusTab();
+    });
+  });
+
+  // Focus range toggle (Today / This week)
+  document.querySelectorAll('.focus-range-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      _focusRange = btn.dataset.focusRange || 'today';
+      document.querySelectorAll('.focus-range-btn').forEach(x => x.classList.toggle('active', x === btn));
+      renderFocusTab();
+    });
+  });
+
+  // "Manage rules" jumps to Settings → Focus Tools.
+  const focusSettingsBtn = document.getElementById('btnFocusGotoSettings');
+  if(focusSettingsBtn){
+    focusSettingsBtn.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+      document.querySelectorAll('.tab-pane').forEach(x => x.classList.remove('active'));
+      document.querySelector('.tab[data-tab="settings"]').classList.add('active');
+      document.querySelector('.tab-pane[data-pane="settings"]').classList.add('active');
+      document.querySelectorAll('.settings-subnav-btn').forEach(x => x.classList.toggle('active', x.dataset.subtab === 'focus'));
+      document.querySelectorAll('.settings-subpane').forEach(sp => sp.classList.toggle('active', sp.dataset.subpane === 'focus'));
+    });
+  }
+
+  // Settings sub-navigation. The selected subpane persists for the session
+  // (renderAll re-renders content but does not reset the visible subpane).
+  document.querySelectorAll('.settings-subnav-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const target = btn.dataset.subtab;
+      document.querySelectorAll('.settings-subnav-btn').forEach(x => x.classList.toggle('active', x === btn));
+      document.querySelectorAll('.settings-subpane').forEach(sp => {
+        sp.classList.toggle('active', sp.dataset.subpane === target);
+      });
     });
   });
   document.getElementById('insightsRange').addEventListener('change', renderInsights);
@@ -4023,6 +5696,99 @@ document.getElementById('btnDeleteAccount').addEventListener('click', deleteAcco
   });
   document.getElementById('btnResumeNudges').addEventListener('click', resumeNudges);
   document.getElementById('presentationToggle').addEventListener('change', togglePresentationMode);
+  const bringToFrontEl = document.getElementById('bringToFrontToggle');
+  if(bringToFrontEl){
+    bringToFrontEl.addEventListener('change', (e) => {
+      const p = state.settings.productivity || (state.settings.productivity = defaultProductivitySettings());
+      p.bringToFrontForNudges = e.target.checked;
+      save();
+    });
+  }
+
+  // ----- Productivity: focus tracking -----
+  const focusWinEl = document.getElementById('focusEnableWindowTracking');
+  const focusTitlesEl = document.getElementById('focusTrackTitles');
+  const focusIntervalEl = document.getElementById('focusInterval');
+  const focusSuggestedEl = document.getElementById('focusEnableSuggested');
+  const focusDistractionsEl = document.getElementById('focusEnableDistractions');
+  function getFocus(){
+    return state.settings.focus || (state.settings.focus = defaultFocusSettings());
+  }
+  if(focusWinEl){
+    focusWinEl.addEventListener('change', (e) => {
+      const f = getFocus();
+      f.enableWindowTracking = e.target.checked;
+      save();
+      applyFocusSettings();
+      if(!e.target.checked) toast('App/window tracking off');
+      else toast('App/window tracking on');
+    });
+  }
+  if(focusTitlesEl){
+    focusTitlesEl.addEventListener('change', (e) => {
+      const f = getFocus();
+      f.trackWindowTitles = e.target.checked;
+      save();
+      applyFocusSettings();
+    });
+  }
+  if(focusIntervalEl){
+    focusIntervalEl.addEventListener('change', (e) => {
+      const v = Math.max(5, Math.min(300, parseInt(e.target.value, 10) || 30));
+      const f = getFocus();
+      f.windowTrackingIntervalSeconds = v;
+      e.target.value = v;
+      save();
+      applyFocusSettings();
+    });
+  }
+  if(focusSuggestedEl){
+    focusSuggestedEl.addEventListener('change', (e) => {
+      const f = getFocus();
+      f.enableSuggestedFocus = e.target.checked;
+      save();
+      renderSuggestedFocusCard();
+    });
+  }
+  if(focusDistractionsEl){
+    focusDistractionsEl.addEventListener('change', (e) => {
+      const f = getFocus();
+      f.enableDistractionLogging = e.target.checked;
+      save();
+      renderDistractionButton();
+    });
+  }
+
+  // Activity rules + unlogged work
+  const focusRulesEl = document.getElementById('focusEnableActivityRules');
+  if(focusRulesEl){
+    focusRulesEl.addEventListener('change', (e) => {
+      const f = getFocus();
+      f.enableActivityRules = e.target.checked;
+      save();
+      // Re-render Focus tab in case it's open; rule changes affect labels.
+      if(document.querySelector('.tab.active')?.dataset.tab === 'focus') renderFocusTab();
+    });
+  }
+  const focusUnloggedEl = document.getElementById('focusEnableUnloggedWork');
+  if(focusUnloggedEl){
+    focusUnloggedEl.addEventListener('change', (e) => {
+      const f = getFocus();
+      f.enableUnloggedWorkDetection = e.target.checked;
+      save();
+      applyFocusSettings();
+    });
+  }
+  const focusUnloggedMinEl = document.getElementById('focusUnloggedMinutes');
+  if(focusUnloggedMinEl){
+    focusUnloggedMinEl.addEventListener('change', (e) => {
+      const v = Math.max(1, Math.min(180, parseInt(e.target.value, 10) || 30));
+      const f = getFocus();
+      f.defaultUnloggedPromptMinutes = v;
+      e.target.value = v;
+      save();
+    });
+  }
 
   // Working hours inputs
   document.getElementById('workingHoursStart').addEventListener('change', (e) => {

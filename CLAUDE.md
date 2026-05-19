@@ -2,11 +2,13 @@
 
 ## Project Overview
 
-Punch is an Electron-based desktop time-tracking app for freelancers and small
-teams. Core focus: accurate session tracking, billable-hours management,
-lightweight always-on widget, and a productivity layer (tasks, nudges, daily
-closeout). **Current shipped version: v1.5.0.** Next planned surface: a Focus
-tab built on the existing selectors/services layer.
+Punch is an Electron-based desktop productivity system for freelancers and
+small teams. Started as a time tracker; v2.0 positioned it as an
+ADHD-friendly focus system. Core surfaces: accurate session tracking, the
+billable-hours layer, the always-on widget, a productivity layer (tasks,
+nudges, daily closeout, carry-forward), and the Focus tab (window/app
+activity, app-site labels, idle, unlogged-work detection, attention drift).
+**Current shipped version: v2.0.0.** Possible future rebrand: "Get Traction".
 
 ---
 
@@ -43,7 +45,7 @@ punch-desktop/
 
 ---
 
-## Core Features (as of v1.5.0)
+## Core Features (as of v2.0.0)
 
 ### Time tracking
 - Start/stop punch sessions tied to projects/accounts
@@ -54,27 +56,36 @@ punch-desktop/
 - Per-account default billable setting (pre-fills new entries; does not override)
 - Billable totals surfaced separately
 
-### Tasks + Today's Plan
+### Tasks + Today tab
 - Multi-project tasks, task-first selection flow with "any project" filter
-- Today's Plan card promotes the day's working set
+- Today tab redesigned around a Daily Snapshot (KPIs + nudge pill + End Day),
+  Suggested Focus card, Today's Priorities, and Today's Log
 - Auto carry-forward bumps overdue active tasks to today on app init
-  (idempotent same-day; bumps priority to `high` unless already higher)
 
 ### Nudges
-- Configurable in-app prompts (interval, active days/hours, snooze, optional
-  timed-break, working-hours respect)
-- Global pause + presentation mode
+- Configurable in-app prompts (interval, active days/hours, snooze)
+- Global pause + presentation mode + per-nudge bring-to-front
 - Hidden-window events queue and surface on `visibilitychange`
-- Mental-break preset auto-seeded disabled, once
 
 ### End Day closeout
-- Modal with KPI strip, project totals, completed list, per-task actions
-  (carry / keep active / complete / archive), missing-notes list
+- KPI strip, project totals, completed list, per-task actions, missing-notes
 - Appends a structured record to `state.dailyCloseouts`
-- Optional under auto carry-forward; required only for explicit decisions
 
-### Insights
-- "Daily closeouts" card with the latest summary + recent closeouts
+### Focus tab (v2.0)
+- Window/app activity detection via `get-windows`
+- User-defined activity rules label apps/sites (matchType: appName /
+  windowTitle / both; categories Work / Communication / Distraction /
+  Utility / Break / Custom)
+- App & site usage rollup, top distractions, idle summary, attention drift
+- Unlogged-work detection: prompts when you've been active in a
+  Work/Communication-labeled app for ≥ threshold with no timer running
+- `focusEvents[]` data foundation (window changes, idle, distractions,
+  nudge responses, suggested focus, end-day, unlogged-work flow)
+
+### Settings — Workspace / Focus Tools / Data & Backup / App Preferences
+- 4-pane subnav restructure (v2.0). Projects management folded into
+  Workspace Setup (the standalone Projects tab was removed).
+- New: Subcategories admin, Activity Rules manager.
 
 ### Mini-mode widget
 - Compact 180×80 window; resize driven from main via IPC
@@ -121,10 +132,12 @@ called from init (`autoCarryForwardOverdueTasks`, `maybeSeedMentalBreakNudge`,
 
 ## Schema
 
-`schemaVersion: 2`. Migration runs on first load via `mergeWithDefaults` +
-`migrateData` in `renderer/app.js`. v2 added: `nudges`, `nudgeEvents`,
-`dailyCloseouts`, `settings.productivity`, plus per-task
-`carryForwardCount` / `lastCarriedForwardAt` / `dailyPriorityRank`.
+`schemaVersion: 4`. Migration runs on first load via `mergeWithDefaults` +
+`migrateData` in `renderer/app.js`. v2 added nudges/closeouts/productivity
+settings. v3 added `focusEvents[]` + `settings.focus` (window tracking
+opt-in). v4 added `activityRules[]` + focus settings for activity rules
+and unlogged-work detection. All migrations are strictly additive — old
+data loads cleanly.
 
 Do not break the on-disk shape without writing a migration step.
 
@@ -148,9 +161,10 @@ Do not break the on-disk shape without writing a migration step.
 |---------|-------|
 | v1.4    | Business tier — billable hours, accounts, mini mode (shipped) |
 | v1.5    | Productivity — Nudges, End Day, auto carry-forward, schema v2 (shipped) |
-| Next    | Focus tab (reuses existing selectors/services) |
+| v2.0    | Focus system — Focus tab, window/app detection, activity rules, unlogged-work detection, attention drift, schema v3+v4 (shipped) |
+| Next    | App/site drill-down on Focus, regex matching for rules, multi-week ranges |
 | Later   | Reporting / export (CSV, PDF), invoice generation |
-| Future  | Mobile passive tracking, call-tracking integration |
+| Future  | Mobile passive tracking, call-tracking integration, possible Get Traction rebrand |
 
 Do not scaffold future-tier features while working on the current one unless
 asked.

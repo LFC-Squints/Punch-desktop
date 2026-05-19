@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('punch', {
   minimize: () => ipcRenderer.invoke('window:minimize'),
   hide: () => ipcRenderer.invoke('window:hide'),
   quitApp: () => ipcRenderer.invoke('window:close-app'),
+  bringToFrontForNudge: () => ipcRenderer.invoke('nudge:bring-to-front'),
 
   setHotkey: (accel) => ipcRenderer.invoke('hotkey:set', accel),
   getHotkey: () => ipcRenderer.invoke('hotkey:get'),
@@ -28,6 +29,12 @@ contextBridge.exposeInMainWorld('punch', {
   startAutodetect: () => ipcRenderer.invoke('autodetect:start'),
   stopAutodetect: () => ipcRenderer.invoke('autodetect:stop'),
   autodetectAvailable: () => ipcRenderer.invoke('autodetect:available'),
+
+  startFocusTracking: ({ intervalSec, trackTitles }) =>
+    ipcRenderer.invoke('focus:tracking:start', { intervalSec, trackTitles }),
+  stopFocusTracking: () => ipcRenderer.invoke('focus:tracking:stop'),
+  focusTrackingAvailable: () => ipcRenderer.invoke('focus:tracking:available'),
+  onFocusWindowChanged: (cb) => ipcRenderer.on('focus:window-changed', (_e, data) => cb(data)),
 
   postWebhook: (url, payload) => ipcRenderer.invoke('webhook:post', { url, payload }),
 
