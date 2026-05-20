@@ -1,5 +1,5 @@
 // ============================================================
-// Punch — Electron main process (v2.1.1)
+// Punch — Electron main process (v2.1.2)
 // Tray app, frameless widget, global hotkeys, idle detection,
 // active-window polling, and GitHub-based auto-updates.
 // ============================================================
@@ -542,7 +542,7 @@ ipcMain.handle('update:download', () => {
 ipcMain.handle('update:install', () => {
   if (!autoUpdater || !app.isPackaged) return false;
   isQuitting = true;
-  setImmediate(() => autoUpdater.quitAndInstall());
+  setImmediate(() => autoUpdater.quitAndInstall(false, true));
   return true;
 });
 
