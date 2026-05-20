@@ -105,7 +105,6 @@
         </div>
         <div class="snap-actions">
           <div id="snapNudgePill" class="snap-nudge-pill" title="Nudge status">Nudges: …</div>
-          <button class="btn btn-distraction hidden" id="btnLogDistraction" title="Log a quick distraction or interruption">⚡ Log distraction</button>
           <button class="btn end-day-btn" id="btnEndDay" title="Generate a closeout summary for today">End Day</button>
         </div>
         <!-- Keep the hidden Last-30 cell to avoid breaking any code that reads it -->
@@ -240,6 +239,11 @@
           <div class="focus-card-title">Suggested focus</div>
           <div id="focusSuggested" class="focus-suggested-inline"></div>
         </div>
+      </div>
+
+      <div class="focus-card">
+        <div class="focus-card-title">Intentional breaks <span class="hint-inline">— timed-break nudges</span></div>
+        <div id="focusBreaks" class="focus-breaks"></div>
       </div>
 
       <div class="focus-card">
@@ -426,10 +430,6 @@
           <label class="checkbox" style="margin-top:6px">
             <input type="checkbox" id="focusEnableSuggested" checked />
             <span>Show a Suggested Focus card on Today</span>
-          </label>
-          <label class="checkbox" style="margin-top:6px">
-            <input type="checkbox" id="focusEnableDistractions" checked />
-            <span>Show the Log Distraction button on Today</span>
           </label>
           <label class="checkbox" style="margin-top:6px">
             <input type="checkbox" id="focusEnableActivityRules" checked />
@@ -818,12 +818,26 @@
       </div>
       <div class="row-2">
         <div class="field">
+          <label class="field-label">Type</label>
+          <select id="nudgeEditType" class="punch-select">
+            <option value="reminder">Reminder</option>
+            <option value="timed_break">Timed break</option>
+            <option value="action_prompt">Action prompt</option>
+          </select>
+        </div>
+        <div class="field">
           <label class="field-label">Category</label>
           <select id="nudgeEditCategory" class="punch-select"></select>
         </div>
+      </div>
+      <div class="row-2">
         <div class="field">
           <label class="field-label">Every (min)</label>
           <input id="nudgeEditInterval" type="number" min="1" max="1440" step="1" />
+        </div>
+        <div class="field">
+          <label class="field-label">Snooze (min)</label>
+          <input id="nudgeEditSnooze" type="number" min="1" max="240" step="1" />
         </div>
       </div>
       <div class="row-2">
@@ -840,14 +854,20 @@
         <label class="field-label">Active days</label>
         <div id="nudgeEditDays" class="nudge-days-row"></div>
       </div>
-      <div class="row-2">
-        <div class="field">
-          <label class="field-label">Snooze (min)</label>
-          <input id="nudgeEditSnooze" type="number" min="1" max="240" step="1" />
-        </div>
-        <div class="field">
-          <label class="field-label">Timed duration (min) <span class="hint-inline">— optional</span></label>
-          <input id="nudgeEditTimed" type="number" min="0" max="120" step="1" placeholder="e.g. 5" />
+      <div class="field hidden" id="nudgeEditTimedField">
+        <label class="field-label">Break duration (min)</label>
+        <input id="nudgeEditTimed" type="number" min="1" max="120" step="1" placeholder="e.g. 5" />
+      </div>
+      <div class="hidden" id="nudgeEditActionBlock">
+        <div class="row-2">
+          <div class="field">
+            <label class="field-label">Project</label>
+            <select id="nudgeEditActionProject" class="punch-select"></select>
+          </div>
+          <div class="field">
+            <label class="field-label">Task <span class="hint-inline">— optional</span></label>
+            <select id="nudgeEditActionTask" class="punch-select"></select>
+          </div>
         </div>
       </div>
       <div class="field">

@@ -1073,18 +1073,6 @@ body.widget-mode .full-view { display: none; }
    Focus Signals — UI
    ============================================================ */
 
-/* Snapshot action: distraction button */
-.btn-distraction {
-  background: rgba(152,116,227,0.12);
-  border-color: rgba(152,116,227,0.35);
-  color: var(--purple);
-}
-.btn-distraction:hover {
-  background: rgba(152,116,227,0.22);
-  color: var(--text);
-  border-color: var(--purple);
-}
-
 /* Distraction modal */
 .distraction-context {
   display: flex; align-items: center; gap: 8px;
@@ -1242,7 +1230,8 @@ body.widget-mode .full-view { display: none; }
 .focus-range-btn:hover { color: var(--text); }
 .focus-range-btn.active { color: var(--amber); background: var(--amber-dim); }
 
-.focus-summary {
+.focus-summary,
+.focus-breaks {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
   gap: 1px;
@@ -1252,6 +1241,7 @@ body.widget-mode .full-view { display: none; }
   overflow: hidden;
   margin-bottom: 14px;
 }
+.focus-breaks { margin-bottom: 0; }
 .focus-summary-cell {
   background: var(--surface);
   padding: 12px 14px;
@@ -1360,6 +1350,10 @@ body.widget-mode .full-view { display: none; }
 .focus-usage-timer-tag {
   font-size: 9px; color: var(--green, #54dd7d);
   margin-left: 6px;
+}
+.focus-distraction-meta {
+  font-size: 10px; color: var(--text-dim);
+  margin-left: 6px; font-weight: 400; font-family: inherit;
 }
 
 .focus-idle {

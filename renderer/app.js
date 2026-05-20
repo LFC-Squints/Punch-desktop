@@ -10,9 +10,10 @@ const DEFAULT_HOTKEY = 'CommandOrControl+Alt+P';
 const WIDGET_SIZE = { width: 360, height: 380 };
 const FULL_SIZE   = { width: 920, height: 720 };
 
-// Bumped to 4 with Focus tab v1 (activityRules, idle events,
-// unlogged-work detection). Strictly additive again.
-const CURRENT_SCHEMA_VERSION = 4;
+// Bumped to 5 with nudge behavior cleanup: nudge.type, nudge.nextDueAt,
+// nudge.logAsTimeEntry, and timed_break_* focus event types. Strictly
+// additive — migration is handled defensively by normalizeNudgeShape.
+const CURRENT_SCHEMA_VERSION = 5;
 
 const defaultProductivitySettings = () => ({
   workingHours: { start: '09:00', end: '17:00', days: [1,2,3,4,5] }, // Mon–Fri
@@ -107,6 +108,10 @@ async function init(){
   // user opens v1.5.0 — discoverable in Settings, off by default.
   autoCarryForwardOverdueTasks();
   maybeSeedMentalBreakNudge();
+  // Forward-schedule every enabled nudge so a stale nextDueAt from a
+  // previous session never causes an instant pop at app open. Must run
+  // BEFORE startNudgeScheduler so the first tick already sees fresh values.
+  initializeNudgeScheduleOnStartup();
 
   renderAll();
   attachIPCListeners();
@@ -220,12 +225,23 @@ function normalizeTaskShape(t){
 
 // Normalize a nudge to the current schema. Per-entity defaults follow the
 // same defensive-spread pattern as tasks so older data loads cleanly.
+//
+// v5 additions: type, nextDueAt, logAsTimeEntry. type is inferred from
+// timedDurationMinutes for pre-v5 data (anything with a duration becomes
+// a timed_break; everything else is a plain reminder). nextDueAt is left
+// null on load and gets seeded by initializeNudgeScheduleOnStartup so the
+// scheduler is forward-looking from the moment the app opens, not catching
+// up on missed sessions.
 function normalizeNudgeShape(n){
+  const hasDuration = typeof n.timedDurationMinutes === 'number' && n.timedDurationMinutes > 0;
+  const inferredType = n.type
+    || (hasDuration ? 'timed_break' : 'reminder');
   return {
     id: n.id,
     name: n.name || 'Untitled nudge',
     message: n.message || '',
     category: n.category || 'Custom',
+    type: inferredType,                 // 'reminder' | 'timed_break' | 'action_prompt'
     intervalMinutes: typeof n.intervalMinutes === 'number' ? n.intervalMinutes : 60,
     activeDays: Array.isArray(n.activeDays) ? n.activeDays : [1,2,3,4,5],
     activeStartTime: n.activeStartTime || '09:00',
@@ -235,9 +251,14 @@ function normalizeNudgeShape(n){
     respectWorkingHours: n.respectWorkingHours !== false,
     allowWhenActiveOutsideHours: !!n.allowWhenActiveOutsideHours,
     timedDurationMinutes: typeof n.timedDurationMinutes === 'number' ? n.timedDurationMinutes : null,
+    logAsTimeEntry: !!n.logAsTimeEntry, // future-ready; UI does not expose this yet
+    // Action prompt config — always starts a timer for the given project/task.
+    actionProjectId: n.actionProjectId || null,
+    actionTaskId: n.actionTaskId || null,
     createdAt: n.createdAt || Date.now(),
     updatedAt: n.updatedAt || Date.now(),
     lastTriggeredAt: n.lastTriggeredAt || null,
+    nextDueAt: typeof n.nextDueAt === 'number' ? n.nextDueAt : null,
     archivedAt: n.archivedAt || null,
     snoozeUntil: n.snoozeUntil || null // per-nudge snooze state
   };
@@ -1030,7 +1051,7 @@ function renderAll(){
   renderTasks(); renderProjects(); renderSubcategoriesAdmin(); renderRules();
   renderAccountsList(); updateAccountLabels(); renderLog();
   renderNudgeManager(); renderNudgePauseStatus();
-  renderDistractionButton(); renderSuggestedFocusCard();
+  renderSuggestedFocusCard();
   renderActivityRulesList();
 }
 
@@ -2826,8 +2847,11 @@ function commitDailyCloseout(preview, selections){
 // One scheduler tick checks all enabled nudges. Triggering is gated by:
 // global pause, presentation mode, working hours (unless overridden),
 // the nudge's own activeDays/activeStart/activeEnd window, snoozeUntil,
-// and intervalMinutes since lastTriggeredAt. Triggers create a nudgeEvent
-// in 'triggered' state; user responses transition it to done/snoozed/skipped.
+// and the forward-looking nextDueAt (v5+) — never on (now - lastTriggeredAt),
+// so a nudge that was overdue while the app was closed does NOT fire
+// immediately on next launch. lastTriggeredAt is retained as a display-only
+// "last fired" field. Triggers create a nudgeEvent in 'triggered' state;
+// user responses transition it to done/snoozed/skipped.
 // If the app isn't visible when a nudge fires, it queues until visible.
 // ============================================================
 
@@ -2887,8 +2911,65 @@ function isWithinNudgeWindow(nudge, nowMs){
   return mins >= sh*60 + sm && mins < eh*60 + em;
 }
 
+// Forward-schedule a single nudge's nextDueAt. Reason controls the formula:
+//   'init'   — first scheduling at app open; respects an active snoozeUntil,
+//              otherwise sets due = base + interval
+//   'resume' — same as init; used when global pause/presentation mode ends
+//   'fire'   — call after a nudge triggers, so the next tick won't immediately
+//              refire while the popup is open or the event is unresponded
+//   'done'   — user acknowledged; due = base + interval
+//   'snooze' — user snoozed; due = base + defaultSnoozeMinutes
+//   'skip'   — user dismissed; due = base + interval (no shorter retry)
+// base defaults to now. Returns the scheduled timestamp.
+function scheduleNextNudge(nudge, reason, baseTimeMs){
+  const base = typeof baseTimeMs === 'number' ? baseTimeMs : Date.now();
+  const intervalMs = (nudge.intervalMinutes || 60) * 60 * 1000;
+  let due;
+  if(reason === 'snooze'){
+    const snoozeMin = nudge.defaultSnoozeMinutes || 15;
+    due = base + snoozeMin * 60 * 1000;
+  } else if(reason === 'init' || reason === 'resume'){
+    // An active snooze takes precedence — we don't yank a snooze forward.
+    if(nudge.snoozeUntil && nudge.snoozeUntil > base){
+      due = nudge.snoozeUntil;
+    } else {
+      due = base + intervalMs;
+    }
+  } else {
+    // 'fire' | 'done' | 'skip' — standard forward interval from base.
+    due = base + intervalMs;
+  }
+  nudge.nextDueAt = due;
+  return due;
+}
+
+// Called once at init. Walks every enabled nudge and assigns a forward-looking
+// nextDueAt so a nudge that was "overdue" while the app was closed does NOT
+// fire immediately on next launch. This is the core of the no-backlog rule.
+function initializeNudgeScheduleOnStartup(){
+  const now = Date.now();
+  let dirty = false;
+  for(const n of state.nudges){
+    if(!n.enabled) continue;
+    // Missing or stale (past) due time → push forward.
+    if(typeof n.nextDueAt !== 'number' || n.nextDueAt < now){
+      scheduleNextNudge(n, 'init', now);
+      dirty = true;
+    } else if(n.snoozeUntil && n.snoozeUntil > now && n.nextDueAt < n.snoozeUntil){
+      // A snooze set in a prior session that extends past the existing nextDueAt
+      // should win. Rare but cheap to handle.
+      n.nextDueAt = n.snoozeUntil;
+      dirty = true;
+    }
+  }
+  if(dirty) save();
+}
+
 // Decision function. Returns { fire: bool, reason: string } so logging can
 // explain why a nudge didn't fire — useful when debugging in the future.
+// Forward-looking: gated on nextDueAt, not on (now - lastTriggeredAt). A
+// pre-v5 nudge that has not yet been touched by initializeNudgeScheduleOnStartup
+// is treated as not-yet-scheduled (won't fire) rather than as overdue.
 function shouldNudgeFire(nudge, nowMs){
   if(!nudge.enabled) return { fire:false, reason:'disabled' };
   if(nudge.archivedAt) return { fire:false, reason:'archived' };
@@ -2900,9 +2981,8 @@ function shouldNudgeFire(nudge, nowMs){
       return { fire:false, reason:'outside-working-hours' };
     }
   }
-  const last = nudge.lastTriggeredAt || 0;
-  const elapsed = nowMs - last;
-  if(elapsed < nudge.intervalMinutes * 60 * 1000) return { fire:false, reason:'interval-not-elapsed' };
+  if(typeof nudge.nextDueAt !== 'number') return { fire:false, reason:'not-scheduled' };
+  if(nudge.nextDueAt > nowMs) return { fire:false, reason:'not-yet-due' };
   return { fire:true, reason:'ok' };
 }
 
@@ -2928,6 +3008,9 @@ function createNudgeTriggerEvent(nudge){
   };
   state.nudgeEvents.push(ev);
   nudge.lastTriggeredAt = now;
+  // Forward-schedule immediately so an unresponded popup doesn't re-fire on
+  // the next tick. User actions (Done/Snooze/Skip/Start Break) overwrite this.
+  scheduleNextNudge(nudge, 'fire', now);
   save();
   return ev;
 }
@@ -3168,32 +3251,22 @@ function getSuggestedFocusHistory(rangeStartMs, rangeEndMs){
 
 // Day-level rollup used by the Insights Attention Drift card and any
 // future closeout/AI summary that wants a single object summarizing
-// drift signals.
+// drift signals. Distraction metrics come from automated activity-rule
+// matching (calculateActivityBlocks) rather than manual log events.
 function getAttentionDriftSummary(rangeStartMs, rangeEndMs){
   const events = getFocusEventsForRange(rangeStartMs, rangeEndMs);
   const counts = {
-    distractions: 0,
     projectSwitches: 0,
     taskSwitches: 0,
     windowChanges: 0,
     nudgesDone: 0, nudgesSnoozed: 0, nudgesSkipped: 0,
     suggestedShown: 0, suggestedAccepted: 0, suggestedDismissed: 0
   };
-  const distractionTypes = new Map();
-  const appUse = new Map();
   for(const e of events){
     switch(e.type){
-      case 'distraction_logged':
-        counts.distractions++;
-        const dt = (e.metadata && e.metadata.distractionType) || 'Other';
-        distractionTypes.set(dt, (distractionTypes.get(dt) || 0) + 1);
-        break;
       case 'project_switched': counts.projectSwitches++; break;
       case 'task_switched': counts.taskSwitches++; break;
-      case 'window_changed':
-        counts.windowChanges++;
-        if(e.appName) appUse.set(e.appName, (appUse.get(e.appName) || 0) + 1);
-        break;
+      case 'window_changed': counts.windowChanges++; break;
       case 'nudge_done': counts.nudgesDone++; break;
       case 'nudge_snoozed': counts.nudgesSnoozed++; break;
       case 'nudge_skipped': counts.nudgesSkipped++; break;
@@ -3202,12 +3275,14 @@ function getAttentionDriftSummary(rangeStartMs, rangeEndMs){
       case 'suggested_focus_dismissed': counts.suggestedDismissed++; break;
     }
   }
-  const mostUsedApp = [...appUse.entries()].sort((a,b) => b[1] - a[1])[0] || null;
-  const topDistraction = [...distractionTypes.entries()].sort((a,b) => b[1] - a[1])[0] || null;
+  // Automated distraction metrics from activity-rule-matched blocks.
+  const distrBlocks = calculateActivityBlocks({ startMs: rangeStartMs, endMs: rangeEndMs })
+    .filter(b => b.category === 'Distraction');
+  const distractionMs = distrBlocks.reduce((sum, b) => sum + b.durationMs, 0);
   return {
     ...counts,
-    mostUsedApp: mostUsedApp ? { appName: mostUsedApp[0], count: mostUsedApp[1] } : null,
-    topDistractionType: topDistraction ? { type: topDistraction[0], count: topDistraction[1] } : null
+    distractionMs,
+    distractionBlocks: distrBlocks.length
   };
 }
 
@@ -3239,19 +3314,7 @@ const DISTRACTION_TYPES = [
 ];
 let _selectedDistractionType = null;
 
-function renderDistractionButton(){
-  const btn = document.getElementById('btnLogDistraction');
-  if(!btn) return;
-  const f = state.settings.focus || {};
-  btn.classList.toggle('hidden', f.enableDistractionLogging === false);
-}
-
 function openDistractionModal(){
-  const f = state.settings.focus || {};
-  if(f.enableDistractionLogging === false){
-    toast('Enable distraction logging in Settings → Focus Tools');
-    return;
-  }
   _selectedDistractionType = DISTRACTION_TYPES[0];
   // Context strip: show what currently links to this distraction so the
   // user understands what it'll be tagged against.
@@ -3446,6 +3509,33 @@ function getTopDistractionsForRange(startMs, endMs){
   return rollupBlocks(blocks, 'label');
 }
 
+// Intentional break rollup. Drives the Focus "Intentional breaks" card and
+// any future closeout/AI summary that wants a single object describing how
+// many timed-break nudges the user actually completed. Reads focusEvents
+// directly so it picks up history from before this helper existed.
+function getTimedBreakSummaryForRange(startMs, endMs){
+  const out = {
+    completed: 0,
+    skipped: 0,
+    snoozed: 0,
+    plannedMinutes: 0,
+    actualMinutes: 0
+  };
+  for(const e of state.focusEvents){
+    if(e.ts < startMs || e.ts > endMs) continue;
+    if(e.type === 'timed_break_completed'){
+      out.completed++;
+      out.plannedMinutes += (e.metadata && e.metadata.plannedDurationMinutes) || 0;
+      out.actualMinutes  += (e.metadata && e.metadata.actualDurationMinutes) || 0;
+    } else if(e.type === 'timed_break_skipped'){
+      out.skipped++;
+    } else if(e.type === 'timed_break_snoozed'){
+      out.snoozed++;
+    }
+  }
+  return out;
+}
+
 // Idle summary: total idle time + longest idle block + how much of the
 // idle overlapped a running timer (a strong signal the user forgot to
 // stop the clock).
@@ -3573,6 +3663,7 @@ function renderFocusTab(){
   renderTopDistractions();
   renderIdleSummary();
   renderFocusSuggested();
+  renderIntentionalBreaks();
   renderRecentFocusEvents();
   // Range subtitle
   const lbl = document.getElementById('focusRangeLabel');
@@ -3644,10 +3735,35 @@ function renderAppSiteUsage(){
 }
 
 function renderTopDistractions(){
+  const wrap = document.getElementById('focusDistractions');
+  if(!wrap) return;
+  const hasDistractionRules = (state.activityRules || [])
+    .some(r => r.enabled !== false && r.category === 'Distraction');
+  if(!hasDistractionRules){
+    wrap.innerHTML = '<div class="empty" style="padding:10px 0">No distraction rules yet. Add rules for apps like YouTube, Reddit, or social media in <strong>Settings → Focus Tools → Activity Rules</strong> to track distraction time automatically.</div>';
+    return;
+  }
   const { start, end } = focusRangeWindow();
   const rows = getTopDistractionsForRange(start, end);
-  const total = rows.reduce((s, r) => s + r.durationMs, 0);
-  renderUsageList('focusDistractions', rows, total);
+  if(!rows.length){
+    wrap.innerHTML = '<div class="empty" style="padding:10px 0">No matched distractions for this range.</div>';
+    return;
+  }
+  const totalMs = rows.reduce((s, r) => s + r.durationMs, 0);
+  const maxMs = Math.max(1, totalMs);
+  wrap.innerHTML = rows.slice(0, 8).map(r => {
+    const barPct = Math.max(2, Math.round((r.durationMs / maxMs) * 100));
+    const blockLabel = `${r.blocks} block${r.blocks !== 1 ? 's' : ''}`;
+    return `
+      <div class="focus-usage-row">
+        <div class="focus-usage-head">
+          <span class="focus-usage-label">${esc(r.name)}</span>
+          <span class="focus-usage-cat distraction">Distraction</span>
+        </div>
+        <div class="focus-usage-time">${esc(formatDurationMs(r.durationMs))} <span class="focus-distraction-meta">${esc(blockLabel)}</span></div>
+        <div class="focus-usage-bar"><div class="focus-usage-bar-fill distraction" style="width:${barPct}%"></div></div>
+      </div>`;
+  }).join('');
 }
 
 function renderIdleSummary(){
@@ -3668,6 +3784,30 @@ function renderIdleSummary(){
     html += `<div class="focus-idle-warning">⚠ Timer was running during ${esc(formatDurationMs(idle.timerDuringIdleMs))} of idle time. Consider trimming those entries.</div>`;
   }
   wrap.innerHTML = html;
+}
+
+function renderIntentionalBreaks(){
+  const wrap = document.getElementById('focusBreaks');
+  if(!wrap) return;
+  const { start, end } = focusRangeWindow();
+  const s = getTimedBreakSummaryForRange(start, end);
+  if(s.completed === 0 && s.skipped === 0 && s.snoozed === 0){
+    wrap.innerHTML = '<div class="empty" style="padding:10px 0">No timed breaks yet for this range. Set a nudge\'s type to <strong>Timed break</strong> in Settings → Workspace Setup → Nudges to track intentional resets.</div>';
+    return;
+  }
+  const resetMs = s.actualMinutes * 60000;
+  const cells = [
+    { label: 'Completed', value: String(s.completed) },
+    { label: 'Reset time', value: resetMs > 0 ? formatDurationMs(resetMs) : '0m' },
+    { label: 'Skipped',   value: String(s.skipped) },
+    { label: 'Snoozed',   value: String(s.snoozed) }
+  ];
+  wrap.innerHTML = cells.map(c => `
+    <div class="focus-summary-cell">
+      <div class="focus-summary-label">${esc(c.label)}</div>
+      <div class="focus-summary-value">${esc(c.value)}</div>
+    </div>
+  `).join('');
 }
 
 function renderFocusSuggested(){
@@ -4104,6 +4244,19 @@ function buildFocusEventDetail(e){
     const dur = e.metadata?.durationMs ? formatDurationMs(e.metadata.durationMs) : '';
     return esc([projTask, dur].filter(Boolean).join(' · '));
   }
+  if(e.type === 'timed_break_started' || e.type === 'timed_break_completed'
+     || e.type === 'timed_break_skipped' || e.type === 'timed_break_snoozed'){
+    const planned = e.metadata?.plannedDurationMinutes;
+    const actual  = e.metadata?.actualDurationMinutes;
+    const parts = [];
+    if(planned) parts.push(`${planned}m planned`);
+    if(e.type === 'timed_break_completed' && typeof actual === 'number') parts.push(`${actual}m actual`);
+    return esc(parts.join(' · '));
+  }
+  if(e.type === 'nudge_action_executed'){
+    const action = (e.metadata?.actionType || '').replace(/_/g, ' ');
+    return esc([action, projTask].filter(Boolean).join(' · '));
+  }
   return esc(projTask);
 }
 
@@ -4399,23 +4552,24 @@ function renderAttentionDriftCard(){
   const { start, end } = dayWindow(today);
   const summary = getAttentionDriftSummary(start, end);
   const noSignals =
-    summary.distractions === 0 &&
+    summary.distractionMs === 0 &&
     summary.projectSwitches === 0 &&
     summary.taskSwitches === 0 &&
     summary.windowChanges === 0 &&
     summary.suggestedShown === 0;
   if(noSignals){
-    wrap.innerHTML = '<div class="empty" style="padding:18px">No focus signals captured today yet. Enable app/window tracking in Settings → Focus Tools, or log distractions as they happen.</div>';
+    wrap.innerHTML = '<div class="empty" style="padding:18px">No focus signals captured today yet. Enable app/window tracking in Settings → Focus Tools.</div>';
     return;
   }
   const acceptRate = summary.suggestedShown > 0
     ? Math.round((summary.suggestedAccepted / summary.suggestedShown) * 100)
     : null;
+  const blockLabel = `${summary.distractionBlocks} block${summary.distractionBlocks !== 1 ? 's' : ''}`;
   const cells = [
-    { label: 'Distractions', value: summary.distractions, sub: summary.topDistractionType ? `top: ${summary.topDistractionType.type}` : '' },
+    { label: 'Distraction time', value: summary.distractionMs > 0 ? formatDurationMs(summary.distractionMs) : '0m', sub: blockLabel },
     { label: 'Project switches', value: summary.projectSwitches, sub: '' },
     { label: 'Task switches', value: summary.taskSwitches, sub: '' },
-    { label: 'Most-used app', value: summary.mostUsedApp ? summary.mostUsedApp.appName : '—', sub: summary.mostUsedApp ? `${summary.mostUsedApp.count} switches` : 'tracking off' },
+    { label: 'App switches', value: summary.windowChanges, sub: '' },
     { label: 'Suggested accept', value: acceptRate != null ? `${acceptRate}%` : '—', sub: summary.suggestedShown ? `${summary.suggestedAccepted}/${summary.suggestedShown}` : '' }
   ];
   wrap.innerHTML = cells.map(c => `
@@ -4668,12 +4822,23 @@ function showNudgePopup(nudge, event){
   document.getElementById('nudgeModalMessage').textContent = nudge.message || '';
   const timedRow = document.getElementById('nudgeModalTimedRow');
   const timedVal = document.getElementById('nudgeModalTimedValue');
-  if(nudge.timedDurationMinutes){
+  const isTimedBreak = nudge.type === 'timed_break' && nudge.timedDurationMinutes;
+  if(isTimedBreak){
     timedRow.classList.remove('hidden');
     timedVal.textContent = `${nudge.timedDurationMinutes} min`;
   } else {
     timedRow.classList.add('hidden');
   }
+  // Primary button morphs based on nudge type/action so the popup's intent
+  // is obvious at a glance. Dispatch lives in handleNudgePrimaryAction.
+  let primaryLabel = 'Done';
+  if(isTimedBreak){
+    primaryLabel = `Start ${nudge.timedDurationMinutes}m break`;
+  } else if(nudge.type === 'action_prompt'){
+    const proj = nudge.actionProjectId ? getProject(nudge.actionProjectId) : null;
+    primaryLabel = proj ? `Start · ${proj.name}` : 'Start';
+  }
+  document.getElementById('btnNudgeDone').textContent = primaryLabel;
   // Snooze button label reflects the per-nudge configured snooze.
   document.getElementById('btnNudgeSnooze').textContent =
     `Snooze ${nudge.defaultSnoozeMinutes} min`;
@@ -4687,10 +4852,31 @@ function closeNudgePopup(){
   setTimeout(flushPendingNudgeQueue, 50);
 }
 
+// Primary action dispatcher. The popup's primary button morphs by nudge type:
+//   reminder       → "Done"        → handleNudgeDone
+//   timed_break    → "Start break" → handleNudgeStartBreak
+//   action_prompt  → action-specific (e.g., "Start timer") → handleNudgeAction
+// Branching here keeps each handler focused. Wired to btnNudgeDone in bindUI.
+function handleNudgePrimaryAction(){
+  if(!currentNudgePopup) return;
+  const nudge = state.nudges.find(n => n.id === currentNudgePopup.nudgeId);
+  if(nudge && nudge.type === 'timed_break'){
+    handleNudgeStartBreak();
+  } else if(nudge && nudge.type === 'action_prompt'){
+    handleNudgeAction();
+  } else {
+    handleNudgeDone();
+  }
+}
+
 function handleNudgeDone(){
   if(!currentNudgePopup) return;
   const popupInfo = currentNudgePopup;
+  const nudge = state.nudges.find(n => n.id === popupInfo.nudgeId);
+  const now = Date.now();
   recordNudgeResponse(popupInfo.eventId, 'done');
+  if(nudge) scheduleNextNudge(nudge, 'done', now);
+  save();
   toast('Logged');
   closeNudgePopup();
   recordFocusEvent('nudge_done', getActiveWorkContext(),
@@ -4702,23 +4888,140 @@ function handleNudgeSnooze(){
   const popupInfo = currentNudgePopup;
   const nudge = state.nudges.find(n => n.id === popupInfo.nudgeId);
   if(!nudge){ closeNudgePopup(); return; }
+  const now = Date.now();
   const mins = nudge.defaultSnoozeMinutes || 15;
-  const until = Date.now() + mins * 60 * 1000;
+  const until = now + mins * 60 * 1000;
   nudge.snoozeUntil = until;
+  scheduleNextNudge(nudge, 'snooze', now);
   recordNudgeResponse(popupInfo.eventId, 'snoozed', { snoozeUntil: until, snoozeMinutes: mins });
   toast(`Snoozed ${mins} min`);
   closeNudgePopup();
-  recordFocusEvent('nudge_snoozed', getActiveWorkContext(),
+  // For timed_break nudges, the snooze event belongs to the break stream;
+  // for plain reminders/action prompts, it counts as a nudge response.
+  const evType = nudge.type === 'timed_break' ? 'timed_break_snoozed' : 'nudge_snoozed';
+  recordFocusEvent(evType, getActiveWorkContext(),
     { nudgeId: popupInfo.nudgeId, nudgeEventId: popupInfo.eventId, snoozeMinutes: mins });
 }
 
 function handleNudgeSkip(){
   if(!currentNudgePopup) return;
   const popupInfo = currentNudgePopup;
+  const nudge = state.nudges.find(n => n.id === popupInfo.nudgeId);
+  const now = Date.now();
   recordNudgeResponse(popupInfo.eventId, 'skipped');
+  if(nudge) scheduleNextNudge(nudge, 'skip', now);
+  save();
   closeNudgePopup();
-  recordFocusEvent('nudge_skipped', getActiveWorkContext(),
+  const evType = nudge && nudge.type === 'timed_break' ? 'timed_break_skipped' : 'nudge_skipped';
+  recordFocusEvent(evType, getActiveWorkContext(),
     { nudgeId: popupInfo.nudgeId, nudgeEventId: popupInfo.eventId });
+}
+
+// ----- Timed break flow -----
+//
+// In-renderer state — deliberately not persisted. A break in progress when
+// the app quits is simply not completed (its start event is still in
+// focusEvents, the next-due-at is already scheduled forward from start).
+// Treating this as transient avoids ghost completions firing across sessions.
+let activeTimedBreak = null;
+
+function handleNudgeStartBreak(){
+  if(!currentNudgePopup) return;
+  const popupInfo = currentNudgePopup;
+  const nudge = state.nudges.find(n => n.id === popupInfo.nudgeId);
+  if(!nudge){ closeNudgePopup(); return; }
+  const planned = nudge.timedDurationMinutes || 5;
+  const startedAt = Date.now();
+
+  // Log the user's response on the nudge event itself (treated as 'done' from
+  // the nudge perspective; the focus event stream is the break-specific record).
+  recordNudgeResponse(popupInfo.eventId, 'done');
+  scheduleNextNudge(nudge, 'done', startedAt);
+  recordFocusEvent('timed_break_started', getActiveWorkContext(), {
+    nudgeId: nudge.id,
+    nudgeEventId: popupInfo.eventId,
+    plannedDurationMinutes: planned,
+    startedAt
+  });
+
+  // Cancel any prior in-flight break (rare — user would have to start a
+  // second timed_break before the first finished). We don't try to log a
+  // partial completion; the start event is enough record.
+  if(activeTimedBreak && activeTimedBreak.timeoutId){
+    clearTimeout(activeTimedBreak.timeoutId);
+  }
+  activeTimedBreak = {
+    nudgeId: nudge.id,
+    nudgeEventId: popupInfo.eventId,
+    plannedDurationMinutes: planned,
+    startedAt,
+    timeoutId: setTimeout(() => completeTimedBreak('timer'), planned * 60 * 1000)
+  };
+
+  save();
+  toast(`Break started — ${planned} min`);
+  closeNudgePopup();
+}
+
+function completeTimedBreak(source){
+  if(!activeTimedBreak) return;
+  const b = activeTimedBreak;
+  activeTimedBreak = null;
+  if(b.timeoutId) clearTimeout(b.timeoutId);
+  const completedAt = Date.now();
+  const actualMin = Math.max(0, Math.round((completedAt - b.startedAt) / 60000));
+  recordFocusEvent('timed_break_completed', getActiveWorkContext(), {
+    nudgeId: b.nudgeId,
+    nudgeEventId: b.nudgeEventId,
+    plannedDurationMinutes: b.plannedDurationMinutes,
+    actualDurationMinutes: actualMin,
+    completedAt,
+    source: source || 'timer'
+  });
+  toast(`Break complete — ${actualMin}m`);
+}
+
+// ----- Action prompt flow -----
+//
+// Executes the configured action when the user clicks the primary button on
+// an action_prompt nudge. Action prompts do NOT count as timed breaks — they
+// are a separate event stream (nudge_action_executed) so analytics can tell
+// the two apart.
+function handleNudgeAction(){
+  if(!currentNudgePopup) return;
+  const popupInfo = currentNudgePopup;
+  const nudge = state.nudges.find(n => n.id === popupInfo.nudgeId);
+  if(!nudge){ handleNudgeDone(); return; }
+  const now = Date.now();
+
+  // Record response and forward-schedule before starting the timer so the popup
+  // closes cleanly before any navigation side-effects.
+  recordNudgeResponse(popupInfo.eventId, 'done');
+  scheduleNextNudge(nudge, 'done', now);
+  save();
+  closeNudgePopup();
+
+  if(!nudge.actionProjectId){
+    toast('Action prompt has no project configured');
+    return;
+  }
+  // Stop any running timer so elapsed time is persisted before switching context.
+  if(state.activeTimer) stopTimer();
+  startTimer({
+    projectId: nudge.actionProjectId,
+    taskId: nudge.actionTaskId || null,
+    notes: nudge.message || '',
+    subcategoryId: null,
+    accountId: null
+  });
+
+  recordFocusEvent('nudge_action_executed', getActiveWorkContext(), {
+    nudgeId: nudge.id,
+    nudgeEventId: popupInfo.eventId,
+    actionProjectId: nudge.actionProjectId,
+    actionTaskId: nudge.actionTaskId || null,
+    result: 'ok'
+  });
 }
 
 // ----- Settings manager (list + add + edit + delete + pause + presentation) -----
@@ -4734,6 +5037,15 @@ function renderNudgeManager(){
       const snoozed = n.snoozeUntil && n.snoozeUntil > Date.now()
         ? `<span class="nudge-row-snoozed">snoozed until ${new Date(n.snoozeUntil).toLocaleTimeString()}</span>`
         : '';
+      let typeLabel;
+      if(n.type === 'timed_break'){
+        typeLabel = `Timed break${n.timedDurationMinutes ? ` (${n.timedDurationMinutes}m)` : ''}`;
+      } else if(n.type === 'action_prompt'){
+        const proj = n.actionProjectId ? getProject(n.actionProjectId) : null;
+        typeLabel = proj ? `Action prompt · ${proj.name}` : 'Action prompt';
+      } else {
+        typeLabel = 'Reminder';
+      }
       return `
         <div class="nudge-row${n.enabled ? '' : ' disabled'}">
           <label class="nudge-row-toggle">
@@ -4746,9 +5058,8 @@ function renderNudgeManager(){
               ${snoozed}
             </div>
             <div class="nudge-row-meta">
-              Every ${n.intervalMinutes} min · ${n.activeStartTime}–${n.activeEndTime} ·
+              ${esc(typeLabel)} · every ${n.intervalMinutes} min · ${n.activeStartTime}–${n.activeEndTime} ·
               ${n.activeDays.map(d => DAY_NAMES[d]).join(', ')}
-              ${n.timedDurationMinutes ? ` · ${n.timedDurationMinutes}m timed` : ''}
               · last: ${last}
             </div>
           </div>
@@ -4762,8 +5073,12 @@ function renderNudgeManager(){
     cb.addEventListener('change', () => {
       const n = state.nudges.find(x => x.id === cb.dataset.nudgeToggle);
       if(!n) return;
+      const now = Date.now();
       n.enabled = cb.checked;
-      n.updatedAt = Date.now();
+      n.updatedAt = now;
+      // Enabling a nudge from the list should never cause an immediate pop:
+      // forward-schedule from now regardless of the old nextDueAt.
+      if(n.enabled) scheduleNextNudge(n, 'init', now);
       save();
       renderNudgeManager();
     });
@@ -4812,6 +5127,12 @@ function pauseNudges(durationMs){
 function resumeNudges(){
   const p = state.settings.productivity;
   if(p) p.nudgePauseUntil = null;
+  // Forward-schedule all enabled nudges from resume time so the user doesn't
+  // get a backlog dump the moment they unpause.
+  const now = Date.now();
+  for(const n of state.nudges){
+    if(n.enabled) scheduleNextNudge(n, 'resume', now);
+  }
   save();
   renderNudgePauseStatus();
   toast('Nudges resumed');
@@ -4819,7 +5140,16 @@ function resumeNudges(){
 
 function togglePresentationMode(){
   const p = state.settings.productivity || (state.settings.productivity = defaultProductivitySettings());
-  p.presentationModeEnabled = !p.presentationModeEnabled;
+  const wasOn = !!p.presentationModeEnabled;
+  p.presentationModeEnabled = !wasOn;
+  // When leaving presentation mode, treat it like a resume so nudges don't
+  // pile up behind it. Turning it ON requires no scheduling action.
+  if(wasOn){
+    const now = Date.now();
+    for(const n of state.nudges){
+      if(n.enabled) scheduleNextNudge(n, 'resume', now);
+    }
+  }
   save();
   renderNudgePauseStatus();
   toast(p.presentationModeEnabled ? 'Presentation mode ON' : 'Presentation mode OFF');
@@ -4828,6 +5158,17 @@ function togglePresentationMode(){
 // ----- Edit modal -----
 
 let editingNudgeId = null;
+
+// Type drives which conditional blocks are visible:
+//   timed_break    → "Break duration" field
+//   action_prompt  → project/task selectors
+//   reminder       → neither
+function applyNudgeTypeVisibility(type){
+  const dur = document.getElementById('nudgeEditTimedField');
+  const action = document.getElementById('nudgeEditActionBlock');
+  if(dur) dur.classList.toggle('hidden', type !== 'timed_break');
+  if(action) action.classList.toggle('hidden', type !== 'action_prompt');
+}
 
 function openNudgeModal(nudgeId){
   editingNudgeId = nudgeId || null;
@@ -4844,6 +5185,17 @@ function openNudgeModal(nudgeId){
   document.getElementById('nudgeEditEnabled').checked = n ? n.enabled : true;
   document.getElementById('nudgeEditRespectHours').checked = n ? n.respectWorkingHours : true;
   document.getElementById('nudgeEditAllowOutside').checked = n ? !!n.allowWhenActiveOutsideHours : false;
+
+  const typeSel = document.getElementById('nudgeEditType');
+  const initialType = n ? (n.type || 'reminder') : 'reminder';
+  typeSel.value = initialType;
+  applyNudgeTypeVisibility(initialType);
+
+  // Action prompt config — populate even if hidden so a quick type switch shows valid options.
+  const actionProjSel = document.getElementById('nudgeEditActionProject');
+  renderProjectOptions(actionProjSel, (n && n.actionProjectId) || '', true);
+  const actionTaskSel = document.getElementById('nudgeEditActionTask');
+  renderTaskOptions(actionTaskSel, (n && n.actionProjectId) || null, (n && n.actionTaskId) || '');
 
   const catSel = document.getElementById('nudgeEditCategory');
   catSel.innerHTML = NUDGE_CATEGORIES.map(c =>
@@ -4872,12 +5224,26 @@ function saveNudgeFromModal(){
   const name = document.getElementById('nudgeEditName').value.trim();
   if(!name){ toast('Name required'); return; }
   const message = document.getElementById('nudgeEditMessage').value.trim();
+  const type = document.getElementById('nudgeEditType').value || 'reminder';
   const intervalMinutes = Math.max(1, parseInt(document.getElementById('nudgeEditInterval').value, 10) || 60);
   const activeStartTime = document.getElementById('nudgeEditStart').value || '09:00';
   const activeEndTime = document.getElementById('nudgeEditEnd').value || '17:00';
   const defaultSnoozeMinutes = Math.max(1, parseInt(document.getElementById('nudgeEditSnooze').value, 10) || 15);
-  const timedRaw = document.getElementById('nudgeEditTimed').value;
-  const timedDurationMinutes = timedRaw === '' ? null : Math.max(0, parseInt(timedRaw, 10) || 0) || null;
+  // Only timed_break carries a duration. Reminder/action_prompt always clear it.
+  let timedDurationMinutes = null;
+  if(type === 'timed_break'){
+    const timedRaw = document.getElementById('nudgeEditTimed').value;
+    timedDurationMinutes = timedRaw === '' ? null : Math.max(1, parseInt(timedRaw, 10) || 0) || null;
+    if(!timedDurationMinutes){ toast('Break duration required for timed break'); return; }
+  }
+  // Action prompt config. Only populated when type === 'action_prompt' — cleared
+  // for other types so flipping back to reminder doesn't leave a phantom project wired up.
+  let actionProjectId = null, actionTaskId = null;
+  if(type === 'action_prompt'){
+    actionProjectId = document.getElementById('nudgeEditActionProject').value || null;
+    actionTaskId = document.getElementById('nudgeEditActionTask').value || null;
+    if(!actionProjectId){ toast('Pick a project for the action prompt'); return; }
+  }
   const enabled = document.getElementById('nudgeEditEnabled').checked;
   const respectWorkingHours = document.getElementById('nudgeEditRespectHours').checked;
   const allowWhenActiveOutsideHours = document.getElementById('nudgeEditAllowOutside').checked;
@@ -4890,22 +5256,32 @@ function saveNudgeFromModal(){
   if(editingNudgeId){
     const n = state.nudges.find(x => x.id === editingNudgeId);
     if(!n) return;
+    // If the user just enabled a previously-disabled nudge, give it a fresh
+    // forward schedule so it doesn't pop instantly off a stale nextDueAt.
+    const wasEnabled = n.enabled;
     Object.assign(n, {
-      name, message, category, intervalMinutes,
+      name, message, category, type, intervalMinutes,
       activeDays, activeStartTime, activeEndTime,
       defaultSnoozeMinutes, timedDurationMinutes,
+      actionProjectId, actionTaskId,
       enabled, respectWorkingHours, allowWhenActiveOutsideHours,
       updatedAt: now
     });
+    if(enabled && (!wasEnabled || typeof n.nextDueAt !== 'number' || n.nextDueAt < now)){
+      scheduleNextNudge(n, 'init', now);
+    }
   } else {
-    state.nudges.push(normalizeNudgeShape({
+    const created = normalizeNudgeShape({
       id: nextId('n'),
-      name, message, category, intervalMinutes,
+      name, message, category, type, intervalMinutes,
       activeDays, activeStartTime, activeEndTime,
       defaultSnoozeMinutes, timedDurationMinutes,
+      actionProjectId, actionTaskId,
       enabled, respectWorkingHours, allowWhenActiveOutsideHours,
       createdAt: now, updatedAt: now
-    }));
+    });
+    if(created.enabled) scheduleNextNudge(created, 'init', now);
+    state.nudges.push(created);
   }
   save();
   closeModal('nudgeEditModal');
@@ -5221,8 +5597,6 @@ function applyProductivitySettings(){
   if(fwi) fwi.value = f.windowTrackingIntervalSeconds || 30;
   const fse = document.getElementById('focusEnableSuggested');
   if(fse) fse.checked = f.enableSuggestedFocus !== false;
-  const fde = document.getElementById('focusEnableDistractions');
-  if(fde) fde.checked = f.enableDistractionLogging !== false;
   const far = document.getElementById('focusEnableActivityRules');
   if(far) far.checked = f.enableActivityRules !== false;
   const fuw = document.getElementById('focusEnableUnloggedWork');
@@ -5683,8 +6057,21 @@ document.getElementById('btnDeleteAccount').addEventListener('click', deleteAcco
   // ----- Productivity: nudges -----
   document.getElementById('btnAddNudge').addEventListener('click', () => openNudgeModal(null));
   document.getElementById('btnSaveNudge').addEventListener('click', saveNudgeFromModal);
+  const nudgeTypeSel = document.getElementById('nudgeEditType');
+  if(nudgeTypeSel){
+    nudgeTypeSel.addEventListener('change', e => applyNudgeTypeVisibility(e.target.value));
+  }
+  // Refilter the action-task list when the action-project changes — same UX as
+  // the main timer's project/task pair.
+  const nudgeActionProjSel = document.getElementById('nudgeEditActionProject');
+  if(nudgeActionProjSel){
+    nudgeActionProjSel.addEventListener('change', e => {
+      const taskSel = document.getElementById('nudgeEditActionTask');
+      renderTaskOptions(taskSel, e.target.value || null, '');
+    });
+  }
   document.getElementById('btnDeleteNudge').addEventListener('click', deleteNudgeFromModal);
-  document.getElementById('btnNudgeDone').addEventListener('click', handleNudgeDone);
+  document.getElementById('btnNudgeDone').addEventListener('click', handleNudgePrimaryAction);
   document.getElementById('btnNudgeSnooze').addEventListener('click', handleNudgeSnooze);
   document.getElementById('btnNudgeSkip').addEventListener('click', handleNudgeSkip);
   document.querySelectorAll('[data-pause-nudges]').forEach(btn => {
@@ -5710,7 +6097,6 @@ document.getElementById('btnDeleteAccount').addEventListener('click', deleteAcco
   const focusTitlesEl = document.getElementById('focusTrackTitles');
   const focusIntervalEl = document.getElementById('focusInterval');
   const focusSuggestedEl = document.getElementById('focusEnableSuggested');
-  const focusDistractionsEl = document.getElementById('focusEnableDistractions');
   function getFocus(){
     return state.settings.focus || (state.settings.focus = defaultFocusSettings());
   }
@@ -5750,15 +6136,6 @@ document.getElementById('btnDeleteAccount').addEventListener('click', deleteAcco
       renderSuggestedFocusCard();
     });
   }
-  if(focusDistractionsEl){
-    focusDistractionsEl.addEventListener('change', (e) => {
-      const f = getFocus();
-      f.enableDistractionLogging = e.target.checked;
-      save();
-      renderDistractionButton();
-    });
-  }
-
   // Activity rules + unlogged work
   const focusRulesEl = document.getElementById('focusEnableActivityRules');
   if(focusRulesEl){
