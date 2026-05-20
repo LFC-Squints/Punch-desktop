@@ -1,6 +1,6 @@
 {
   "name": "punch-desktop",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "Self-hosted desktop time tracker with subcategories, tasks, accounts, hotkeys, nudges, daily closeouts, and AI summary export",
   "main": "main.js",
   "scripts": {
@@ -50,7 +50,8 @@
       "deleteAppDataOnUninstall": false,
       "allowElevation": false,
       "installerIcon": "assets/icon.ico",
-      "uninstallerIcon": "assets/icon.ico"
+      "uninstallerIcon": "assets/icon.ico",
+      "include": "assets/installer.nsh"
     },
     "portable": {
       "artifactName": "Punch-Portable-${version}.exe"
