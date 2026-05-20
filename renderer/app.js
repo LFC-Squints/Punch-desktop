@@ -3622,9 +3622,8 @@ function setFocusSubpane(name){
 
 function focusRangeWindow(){
   const now = Date.now();
-  if(_focusRange === 'thisWeek'){
-    return { start: startOfWeek(now), end: now };
-  }
+  if(_focusRange === 'thisWeek') return { start: startOfWeek(now), end: now };
+  if(_focusRange === 'last7')    return { start: now - 7 * 86400000, end: now };
   return { start: startOfDay(now), end: now };
 }
 
@@ -4342,11 +4341,283 @@ function renderFocusQualityFlags(data, range){
   wrap.innerHTML = flags.map(f => `<div class="quality-flag tone-${esc(f.tone)}">${esc(f.label)}</div>`).join('');
 }
 
-// Placeholder for the missing-notes list. Real implementation lands in commit #5.
-function renderFocusMissingNotes(/* range */){
+// Entries with no notes within the given window. Used by the Quality subpane
+// and by Suggested Focus's "missing context" hint.
+function getMissingNotesEntriesForRange(startMs, endMs){
+  return state.entries
+    .filter(e => e.endMs > startMs && e.startMs < endMs && !(e.notes || '').trim())
+    .sort((a, b) => b.startMs - a.startMs);
+}
+
+// Top 5 entries missing notes for the selected range. "View all" opens the
+// paginated modal; jump-to-log link is also available via the same modal.
+function renderFocusMissingNotes(range){
   const wrap = document.getElementById('focusMissingNotes');
   if(!wrap) return;
-  wrap.innerHTML = '<div class="insights-empty">Missing-notes list coming next — use the Log tab for now.</div>';
+  const items = getMissingNotesEntriesForRange(range.start, range.end);
+  if(items.length === 0){
+    wrap.innerHTML = '<div class="insights-empty">No missing notes for this range — your tracking data is clean.</div>';
+    return;
+  }
+  const shown = items.slice(0, 5);
+  let html = '';
+  for(const e of shown){
+    const project = e.projectId ? getProject(e.projectId) : null;
+    const task = e.taskId ? getTask(e.taskId) : null;
+    const durMs = Math.max(0, (e.endMs || Date.now()) - e.startMs);
+    const when = new Date(e.startMs).toLocaleString();
+    html += `<div class="insights-item">
+      <span class="insights-item-mark insights-mark-overdue">!</span>
+      <div class="insights-item-main">
+        <div class="insights-item-name">${esc(project ? project.name : '(unknown project)')}${task ? ` · ${esc(task.name)}` : ''}</div>
+        <div class="insights-item-sub">${esc(when)} · ${esc(formatDurationMs(durMs))} · no notes</div>
+      </div>
+    </div>`;
+  }
+  if(items.length > shown.length){
+    html += `<div class="insights-empty">…and ${items.length - shown.length} more — use “View all”.</div>`;
+  }
+  wrap.innerHTML = html;
+}
+
+// ============================================================
+// FOCUS v1 — Paginated drill-down modal
+// ============================================================
+// Generic modal that any Focus card's "View all" button feeds. The caller
+// supplies the title, the full items array, a per-item renderRow function,
+// and an optional perPage / emptyText. Pagination state is local to each
+// open — no module-level state to leak between drill-downs.
+
+function openFocusListModal({ title, items, perPage, renderRow, emptyText, footer }){
+  const titleEl = document.getElementById('focusListModalTitle');
+  const bodyEl  = document.getElementById('focusListModalBody');
+  const pagerEl = document.getElementById('focusListModalPager');
+  if(!titleEl || !bodyEl || !pagerEl) return;
+  titleEl.textContent = title || 'All items';
+  const pp = perPage || 25;
+  const safeItems = Array.isArray(items) ? items : [];
+  const totalPages = Math.max(1, Math.ceil(safeItems.length / pp));
+  let page = 1;
+
+  function render(){
+    if(safeItems.length === 0){
+      bodyEl.innerHTML = `<div class="insights-empty" style="padding:24px">${esc(emptyText || 'Nothing to show.')}</div>`;
+      pagerEl.innerHTML = '';
+      return;
+    }
+    const startIdx = (page - 1) * pp;
+    const slice = safeItems.slice(startIdx, startIdx + pp);
+    let html = slice.map(renderRow).join('');
+    if(footer) html += footer;
+    bodyEl.innerHTML = html;
+    bodyEl.scrollTop = 0;
+    pagerEl.innerHTML = `
+      <button data-pager="prev" ${page <= 1 ? 'disabled' : ''}>← Prev</button>
+      <span>Page ${page} / ${totalPages} · ${safeItems.length} item${safeItems.length === 1 ? '' : 's'}</span>
+      <button data-pager="next" ${page >= totalPages ? 'disabled' : ''}>Next →</button>
+    `;
+    const prev = pagerEl.querySelector('[data-pager="prev"]');
+    const next = pagerEl.querySelector('[data-pager="next"]');
+    if(prev) prev.addEventListener('click', () => { if(page > 1){ page--; render(); } });
+    if(next) next.addEventListener('click', () => { if(page < totalPages){ page++; render(); } });
+  }
+  render();
+  openModal('focusListModal');
+}
+
+// Click router for every [data-focus-viewall] button. Looks up the kind, pulls
+// the right dataset from the current range, then delegates to openFocusListModal
+// with a per-kind row renderer. Keeps the kind→data mapping in one place.
+function handleFocusViewAll(kind){
+  const { start, end } = focusRangeWindow();
+  const range = focusRangeForInsights();
+
+  if(kind === 'appUsage'){
+    const rows = getAppSiteUsageForRange(start, end, 'label');
+    openFocusListModal({
+      title: 'All app & site usage',
+      items: rows,
+      perPage: 25,
+      emptyText: 'No app activity for this range.',
+      renderRow: r => {
+        const catKey = categoryCss(r.category);
+        return `<div class="focus-usage-row">
+          <div class="focus-usage-head">
+            <span class="focus-usage-label">${esc(r.name)}</span>
+            <span class="focus-usage-cat ${catKey}">${esc(r.category)}</span>
+          </div>
+          <div class="focus-usage-time">${esc(formatDurationMs(r.durationMs))}</div>
+        </div>`;
+      }
+    });
+    return;
+  }
+  if(kind === 'distractions'){
+    const rows = getTopDistractionsForRange(start, end);
+    openFocusListModal({
+      title: 'All distractions',
+      items: rows,
+      perPage: 25,
+      emptyText: 'No matched distractions for this range.',
+      renderRow: r => {
+        const blockLabel = `${r.blocks} block${r.blocks !== 1 ? 's' : ''}`;
+        return `<div class="focus-usage-row">
+          <div class="focus-usage-head">
+            <span class="focus-usage-label">${esc(r.name)}</span>
+            <span class="focus-usage-cat distraction">Distraction</span>
+          </div>
+          <div class="focus-usage-time">${esc(formatDurationMs(r.durationMs))} <span class="focus-distraction-meta">${esc(blockLabel)}</span></div>
+        </div>`;
+      }
+    });
+    return;
+  }
+  if(kind === 'focusEvents'){
+    const events = state.focusEvents
+      .filter(e => e.ts >= start && e.ts <= end)
+      .slice()
+      .reverse();
+    openFocusListModal({
+      title: 'All focus events',
+      items: events,
+      perPage: 25,
+      emptyText: 'No focus events captured yet for this range.',
+      renderRow: e => `<div class="focus-recent-row">
+        <div class="focus-recent-time">${esc(formatTimeOfDay(e.ts))}</div>
+        <div class="focus-recent-type">${esc(e.type.replace(/_/g, ' '))}</div>
+        <div class="focus-recent-detail">${buildFocusEventDetail(e)}</div>
+      </div>`
+    });
+    return;
+  }
+  if(kind === 'projects'){
+    const data = buildSummaryData(range);
+    const colorByName = new Map(state.projects.map(p => [p.name, p.color]));
+    const maxHours = Math.max(...data.projects.map(p => p.hours), 0.01);
+    openFocusListModal({
+      title: 'All projects in this range',
+      items: data.projects,
+      perPage: 25,
+      emptyText: 'No time logged for this range.',
+      renderRow: p => {
+        const widthPct = (p.hours / maxHours) * 100;
+        const color = colorByName.get(p.name) || '#666';
+        return `<div class="proj-bar-row">
+          <div class="proj-bar-label" title="${esc(p.name)}">${esc(p.name)}</div>
+          <div class="proj-bar-track">
+            <div class="proj-bar-fill" style="width:${widthPct}%;background:${esc(color)}"></div>
+          </div>
+          <div class="proj-bar-value mono">${p.hours}h <span class="proj-bar-pct">${p.percent}%</span></div>
+        </div>`;
+      }
+    });
+    return;
+  }
+  if(kind === 'completedTasks' || kind === 'inFlight'){
+    const data = buildSummaryData(range);
+    const completed = kind === 'completedTasks';
+    const items = completed ? data.completedTasks : data.incompleteWithTime;
+    openFocusListModal({
+      title: completed ? 'All completed tasks' : 'All in-flight tasks',
+      items, perPage: 25,
+      emptyText: completed ? 'No completed tasks for this range.' : 'No in-flight tasks for this range.',
+      renderRow: t => {
+        const accountSuffix = t.account ? ` · ${esc(t.account)}` : '';
+        if(completed){
+          return `<div class="insights-item">
+            <span class="insights-item-mark insights-mark-done">✓</span>
+            <div class="insights-item-main">
+              <div class="insights-item-name">${esc(t.name)}</div>
+              <div class="insights-item-sub">${esc(t.project)}${accountSuffix} · ${t.hoursLogged}h logged</div>
+            </div>
+          </div>`;
+        }
+        const due = t.dueDate ? ` · due ${new Date(t.dueDate).toLocaleDateString()}` : '';
+        const est = t.estimatedMinutes ? ` · est ${(t.estimatedMinutes/60).toFixed(1)}h` : '';
+        return `<div class="insights-item">
+          <span class="insights-item-mark insights-mark-flight">⏵</span>
+          <div class="insights-item-main">
+            <div class="insights-item-name">${esc(t.name)}</div>
+            <div class="insights-item-sub">${esc(t.project)} · ${t.hoursLoggedThisPeriod}h this period (${t.hoursLoggedTotal}h total)${est}${due}</div>
+          </div>
+        </div>`;
+      }
+    });
+    return;
+  }
+  if(kind === 'carryForward'){
+    const data = buildSummaryData(range);
+    openFocusListModal({
+      title: 'All carry-forward tasks',
+      items: data.carryForward,
+      perPage: 25,
+      emptyText: 'No carry-forward tasks for this range.',
+      renderRow: t => {
+        const due = new Date(t.dueDate).toLocaleDateString();
+        const prio = t.priority ? `<span class="task-priority-badge prio-${esc(t.priority)}" style="margin-left:6px">${esc(t.priority)}</span>` : '';
+        return `<div class="insights-item ${t.overdue ? 'insights-item-warn' : ''}">
+          <span class="insights-item-mark ${t.overdue ? 'insights-mark-overdue' : 'insights-mark-soon'}">${t.overdue ? '⚠' : '→'}</span>
+          <div class="insights-item-main">
+            <div class="insights-item-name">${esc(t.name)}${prio}</div>
+            <div class="insights-item-sub">${esc(t.project)} · due ${due}${t.overdue ? ' (overdue)' : ''}${t.hoursLoggedTotal > 0 ? ` · ${t.hoursLoggedTotal}h logged` : ''}</div>
+          </div>
+        </div>`;
+      }
+    });
+    return;
+  }
+  if(kind === 'closeouts'){
+    const history = getCloseoutHistory();
+    openFocusListModal({
+      title: 'All daily closeouts',
+      items: history,
+      perPage: 14,
+      emptyText: 'No closeouts yet. Click End Day on the Today tab to capture one.',
+      renderRow: c => {
+        const dateStr = new Date(c.date).toLocaleDateString(undefined, { weekday:'short', month:'short', day:'numeric' });
+        const h = (c.totalTrackedMinutes / 60).toFixed(1);
+        return `<div class="closeout-history-row">
+          <span class="closeout-history-date">${esc(dateStr)}</span>
+          <span class="closeout-history-stats">${h}h · ${c.completedTaskIds.length} done · ${c.carriedForwardTaskIds.length} carried${c.missingNoteEntryIds.length > 0 ? ` · ${c.missingNoteEntryIds.length} missing notes` : ''}</span>
+        </div>`;
+      }
+    });
+    return;
+  }
+  if(kind === 'missingNotes'){
+    const items = getMissingNotesEntriesForRange(start, end);
+    const footer = items.length > 0
+      ? `<div style="text-align:center;padding:12px"><button class="btn" id="btnJumpMissingNotes">Open Log filtered to missing notes</button></div>`
+      : '';
+    openFocusListModal({
+      title: 'All entries missing notes',
+      items, perPage: 25,
+      emptyText: 'No missing notes for this range — clean data.',
+      footer,
+      renderRow: e => {
+        const project = e.projectId ? getProject(e.projectId) : null;
+        const task = e.taskId ? getTask(e.taskId) : null;
+        const durMs = Math.max(0, (e.endMs || Date.now()) - e.startMs);
+        const when = new Date(e.startMs).toLocaleString();
+        return `<div class="insights-item">
+          <span class="insights-item-mark insights-mark-overdue">!</span>
+          <div class="insights-item-main">
+            <div class="insights-item-name">${esc(project ? project.name : '(unknown project)')}${task ? ` · ${esc(task.name)}` : ''}</div>
+            <div class="insights-item-sub">${esc(when)} · ${esc(formatDurationMs(durMs))} · no notes</div>
+          </div>
+        </div>`;
+      }
+    });
+    // Wire the jump-to-Log button after the modal renders.
+    setTimeout(() => {
+      const btn = document.getElementById('btnJumpMissingNotes');
+      if(btn) btn.addEventListener('click', () => {
+        closeModal('focusListModal');
+        jumpToMissingNotesLog();
+      });
+    }, 0);
+    return;
+  }
 }
 
 // ============================================================
@@ -6095,6 +6366,17 @@ document.getElementById('miniTimer').addEventListener('click', exitMiniMode);
     btn.addEventListener('click', () => setFocusSubpane(btn.dataset.focusSubpane));
   });
 
+  // Focus "View all" drill-downs — delegate by [data-focus-viewall] kind.
+  // The dispatcher reads the current range at click time so the modal always
+  // matches what the user is looking at.
+  document.querySelectorAll('[data-focus-viewall]').forEach(btn => {
+    btn.addEventListener('click', () => handleFocusViewAll(btn.dataset.focusViewall));
+  });
+  const closeListBtn = document.getElementById('btnCloseFocusListModal');
+  if(closeListBtn){
+    closeListBtn.addEventListener('click', () => closeModal('focusListModal'));
+  }
+
   // "Manage rules" jumps to Settings → Focus Tools.
   const focusSettingsBtn = document.getElementById('btnFocusGotoSettings');
   if(focusSettingsBtn){
@@ -6482,6 +6764,43 @@ function updateMiniTimer() {
 // What's New Modal
 // ------------------------------------------------------------
 const WHATS_NEW_CONTENT = {
+  '2.2.0': `
+    <h3>🎯 Focus Analytics Hub</h3>
+    <ul>
+      <li>The Focus tab is now the central productivity dashboard — the standalone <strong>Insights</strong> tab has been retired and all its cards live inside Focus.</li>
+      <li>Focus now has 5 internal subtabs to keep things scannable instead of one giant scroll:
+        <strong>Overview / Attention / Time &amp; Projects / Tasks / Quality</strong>.</li>
+    </ul>
+
+    <h3>📊 What lives where</h3>
+    <ul>
+      <li><strong>Overview</strong>: Active / Work / Distraction / Idle / Unlogged / Traction summary, Suggested Focus, Intentional Breaks, a Time-by-Category breakdown, and a "Today's biggest signal" tile.</li>
+      <li><strong>Attention</strong>: range-aware Attention Drift, App &amp; Site Usage, Top Distractions, Idle Time, and the latest 10 focus events.</li>
+      <li><strong>Time &amp; Projects</strong>: Tracked / Billable / Non-billable / Entries KPIs, the Daily Activity chart (last 14 days), and Hours by Project (top 5).</li>
+      <li><strong>Tasks</strong>: Completed / In flight / Active / Overdue KPIs, recent Tasks Completed, In Flight, Carry Forward, and Daily Closeouts.</li>
+      <li><strong>Quality</strong>: notes coverage, missing-notes count, estimate accuracy, plus a real list of entries missing notes (with a one-click jump to Log filtered to missing notes).</li>
+    </ul>
+
+    <h3>🔭 Pagination &amp; drill-downs</h3>
+    <ul>
+      <li>Every long list now caps at 5–10 by default with a <strong>View all</strong> button that opens a paginated modal — no more endless scroll.</li>
+      <li>Drill-downs available for App &amp; Site Usage, Top Distractions, Focus Events, Hours by Project, Tasks Completed, In Flight, Carry Forward, Daily Closeouts, and Missing Notes.</li>
+    </ul>
+
+    <h3>📅 Cleaner range selector</h3>
+    <ul>
+      <li>Focus now uses one shared range: <strong>Today / This week / Last 7 days</strong>. Every subpane respects it.</li>
+      <li>The Daily Activity chart still spans 14 days — that window is labelled clearly so the mixed-range isn't confusing.</li>
+      <li>Attention Drift now follows the Focus range instead of being hard-coded to today.</li>
+    </ul>
+
+    <h3>🛠 Under the hood</h3>
+    <ul>
+      <li>Same data calculations (<code>buildSummaryData</code>, <code>buildDailyRollup</code>, <code>getAttentionDriftSummary</code>) — only the UI structure moved. Nudges, Action Prompts, Timed Breaks, focus events, exports, and AI Summary are all untouched.</li>
+      <li>No schema change. Existing data loads as-is.</li>
+    </ul>
+  `,
+
   '2.1.2': `
     <h3>🔔 Nudge types</h3>
     <ul>
