@@ -3607,6 +3607,18 @@ function formatDurationMs(ms){
 // FOCUS v1 — Tab renderers
 // ============================================================
 let _focusRange = 'today';
+let _focusSubpane = 'overview';
+
+function setFocusSubpane(name){
+  _focusSubpane = name || 'overview';
+  document.querySelectorAll('.focus-subnav-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.focusSubpane === _focusSubpane);
+  });
+  document.querySelectorAll('.focus-subpane').forEach(p => {
+    p.classList.toggle('active', p.dataset.focusSubpane === _focusSubpane);
+  });
+  renderFocusTab();
+}
 
 function focusRangeWindow(){
   const now = Date.now();
@@ -3657,15 +3669,10 @@ function getFocusSummaryForRange(startMs, endMs){
   };
 }
 
+// Top-level Focus renderer. Updates the range label every time, then dispatches
+// to the active subpane's renderer. Each subpane keeps its own cards isolated so
+// scrolling and DOM cost is bounded.
 function renderFocusTab(){
-  renderFocusSummary();
-  renderAppSiteUsage();
-  renderTopDistractions();
-  renderIdleSummary();
-  renderFocusSuggested();
-  renderIntentionalBreaks();
-  renderRecentFocusEvents();
-  // Range subtitle
   const lbl = document.getElementById('focusRangeLabel');
   if(lbl){
     const { start, end } = focusRangeWindow();
@@ -3673,6 +3680,67 @@ function renderFocusTab(){
     const ed = new Date(end).toLocaleDateString();
     lbl.textContent = sd === ed ? sd : `${sd} → ${ed}`;
   }
+  switch(_focusSubpane){
+    case 'attention': renderFocusAttention(); break;
+    case 'time':      renderFocusTime();      break;
+    case 'tasks':     renderFocusTasks();     break;
+    case 'quality':   renderFocusQuality();   break;
+    case 'overview':
+    default:          renderFocusOverview();
+  }
+}
+
+function renderFocusOverview(){
+  renderFocusSummary();
+  renderFocusSuggested();
+  renderIntentionalBreaks();
+  renderFocusCategoryBreakdown();
+  renderFocusBiggestSignal();
+}
+
+function renderFocusAttention(){
+  renderFocusAttentionDrift();
+  renderAppSiteUsage();
+  renderTopDistractions();
+  renderIdleSummary();
+  renderRecentFocusEvents();
+}
+
+function renderFocusTime(){
+  const range = focusRangeForInsights();
+  const data = buildSummaryData(range);
+  renderFocusTimeKpis(data, range);
+  renderFocusDailyChart();
+  renderFocusProjectChart(data);
+}
+
+function renderFocusTasks(){
+  const range = focusRangeForInsights();
+  const data = buildSummaryData(range);
+  renderFocusTasksKpis(data);
+  renderFocusTaskList('focusCompletedTasks', data.completedTasks, 'completed');
+  renderFocusTaskList('focusInFlight', data.incompleteWithTime, 'in-flight');
+  renderFocusCarryForward(data.carryForward);
+  renderFocusCloseouts();
+}
+
+function renderFocusQuality(){
+  const range = focusRangeForInsights();
+  const data = buildSummaryData(range);
+  renderFocusQualityKpis(data);
+  renderFocusQualityFlags(data, range);
+  renderFocusMissingNotes(range);
+}
+
+// Bridge: insights helpers were built around {start, end, label}. Convert the
+// current focus range to that shape so existing buildSummaryData logic is reused
+// unchanged.
+function focusRangeForInsights(){
+  const { start, end } = focusRangeWindow();
+  const label = _focusRange === 'today' ? 'Today'
+              : _focusRange === 'thisWeek' ? 'This week'
+              : 'Last 7 days';
+  return { start, end, label };
 }
 
 function renderFocusSummary(){
@@ -3832,9 +3900,10 @@ function renderRecentFocusEvents(){
   const wrap = document.getElementById('focusRecent');
   if(!wrap) return;
   const { start, end } = focusRangeWindow();
+  // Show only the 10 most recent; "View all events" opens a paginated modal.
   const events = state.focusEvents
     .filter(e => e.ts >= start && e.ts <= end)
-    .slice(-20)
+    .slice(-10)
     .reverse();
   if(!events.length){
     wrap.innerHTML = '<div class="empty" style="padding:10px 0">No focus events captured yet for this range.</div>';
@@ -3850,6 +3919,434 @@ function renderRecentFocusEvents(){
         <div class="focus-recent-detail">${detail}</div>
       </div>`;
   }).join('');
+}
+
+// ----- Overview extras: compact category breakdown + "biggest signal" tile -----
+
+// Compact horizontal bars of work / communication / distraction / utility / break
+// time for the selected range. Reuses focus-usage-list CSS so the Overview matches
+// the rest of the Focus tab visually.
+function renderFocusCategoryBreakdown(){
+  const wrap = document.getElementById('focusCategoryBreakdown');
+  if(!wrap) return;
+  const { start, end } = focusRangeWindow();
+  const s = getFocusSummaryForRange(start, end);
+  const rows = [
+    { name: 'Work',          category: 'Work',          durationMs: s.workMs },
+    { name: 'Communication', category: 'Communication', durationMs: s.communicationMs },
+    { name: 'Utility',       category: 'Utility',       durationMs: s.utilityMs },
+    { name: 'Distraction',   category: 'Distraction',   durationMs: s.distractionMs },
+    { name: 'Break',         category: 'Break',         durationMs: s.breakMs }
+  ].filter(r => r.durationMs > 0);
+  if(!rows.length){
+    wrap.innerHTML = '<div class="empty" style="padding:10px 0">No categorised activity yet for this range.</div>';
+    return;
+  }
+  rows.sort((a, b) => b.durationMs - a.durationMs);
+  const total = rows.reduce((sum, r) => sum + r.durationMs, 0);
+  const max = Math.max(1, rows[0].durationMs);
+  wrap.innerHTML = rows.map(r => {
+    const pct = Math.max(2, Math.round((r.durationMs / max) * 100));
+    const sharePct = Math.round((r.durationMs / total) * 100);
+    const catKey = categoryCss(r.category);
+    return `
+      <div class="focus-usage-row">
+        <div class="focus-usage-head">
+          <span class="focus-usage-label">${esc(r.name)}</span>
+          <span class="focus-usage-cat ${catKey}">${sharePct}%</span>
+        </div>
+        <div class="focus-usage-time">${esc(formatDurationMs(r.durationMs))}</div>
+        <div class="focus-usage-bar"><div class="focus-usage-bar-fill ${catKey}" style="width:${pct}%"></div></div>
+      </div>`;
+  }).join('');
+}
+
+// "Today's biggest signal" — surface the one thing most worth seeing right now.
+// Priority: overdue tasks > unlogged work prompts > high-distraction stretch >
+// latest closeout summary > "all clear" empty state.
+function renderFocusBiggestSignal(){
+  const wrap = document.getElementById('focusBiggestSignal');
+  if(!wrap) return;
+  const overdueCount = state.tasks.filter(t => isTaskActive(t) && t.dueDate && t.dueDate < startOfDay(Date.now())).length;
+  const { start, end } = focusRangeWindow();
+  const s = getFocusSummaryForRange(start, end);
+  let html = '';
+  if(overdueCount > 0){
+    html = `
+      <div class="focus-signal-line"><span class="focus-signal-tag warn">Overdue</span> ${overdueCount} task${overdueCount===1?'':'s'} need attention.</div>
+      <div class="focus-signal-sub">Open the <strong>Tasks</strong> subview to clear or carry them forward.</div>`;
+  } else if(s.unloggedDetectedCount > 0){
+    html = `
+      <div class="focus-signal-line"><span class="focus-signal-tag info">Unlogged</span> ${s.unloggedDetectedCount} work stretch${s.unloggedDetectedCount===1?'':'es'} detected without a timer.</div>
+      <div class="focus-signal-sub">Use the prompt in the widget to recover that time.</div>`;
+  } else if(s.distractionMs >= 30 * 60000){
+    html = `
+      <div class="focus-signal-line"><span class="focus-signal-tag warn">Distraction</span> ${formatDurationMs(s.distractionMs)} on distraction-tagged apps this range.</div>
+      <div class="focus-signal-sub">Check <strong>Attention</strong> to see which apps pulled focus.</div>`;
+  } else {
+    const history = getCloseoutHistory();
+    if(history.length){
+      const latest = history[0];
+      const dateStr = new Date(latest.date).toLocaleDateString();
+      html = `
+        <div class="focus-signal-line"><span class="focus-signal-tag good">Latest closeout</span> ${esc(dateStr)}</div>
+        <div class="focus-signal-sub">${esc(latest.summaryText || 'Summary captured.')}</div>`;
+    } else {
+      html = `<div class="empty" style="padding:10px 0">All clear — no surfaced signal right now.</div>`;
+    }
+  }
+  wrap.innerHTML = html;
+}
+
+// ----- Attention subpane extras -----
+
+// Range-aware version of the old today-only attention drift card. Same metrics,
+// scoped to whichever range Focus is showing.
+function renderFocusAttentionDrift(){
+  const wrap = document.getElementById('focusAttentionDrift');
+  if(!wrap) return;
+  const { start, end } = focusRangeWindow();
+  const summary = getAttentionDriftSummary(start, end);
+  const noSignals =
+    summary.distractionMs === 0 &&
+    summary.projectSwitches === 0 &&
+    summary.taskSwitches === 0 &&
+    summary.windowChanges === 0 &&
+    summary.suggestedShown === 0;
+  if(noSignals){
+    wrap.innerHTML = '<div class="empty" style="padding:18px">No focus signals captured for this range yet. Enable app/window tracking in Settings → Focus Tools.</div>';
+    return;
+  }
+  const acceptRate = summary.suggestedShown > 0
+    ? Math.round((summary.suggestedAccepted / summary.suggestedShown) * 100)
+    : null;
+  const blockLabel = `${summary.distractionBlocks} block${summary.distractionBlocks !== 1 ? 's' : ''}`;
+  const cells = [
+    { label: 'Distraction time', value: summary.distractionMs > 0 ? formatDurationMs(summary.distractionMs) : '0m', sub: blockLabel },
+    { label: 'Project switches', value: summary.projectSwitches, sub: '' },
+    { label: 'Task switches', value: summary.taskSwitches, sub: '' },
+    { label: 'App switches', value: summary.windowChanges, sub: '' },
+    { label: 'Suggested accept', value: acceptRate != null ? `${acceptRate}%` : '—', sub: summary.suggestedShown ? `${summary.suggestedAccepted}/${summary.suggestedShown}` : '' }
+  ];
+  wrap.innerHTML = cells.map(c => `
+    <div class="drift-cell">
+      <div class="drift-label">${esc(c.label)}</div>
+      <div class="drift-value">${esc(String(c.value))}</div>
+      ${c.sub ? `<div class="drift-sub">${esc(c.sub)}</div>` : ''}
+    </div>
+  `).join('');
+}
+
+// ----- Time & Projects subpane renderers -----
+
+// Time-focused KPI tiles: Tracked, Billable, Non-billable, Entries. Uses the
+// existing buildSummaryData totals so calculations don't drift between subpanes.
+function renderFocusTimeKpis(data, range){
+  const wrap = document.getElementById('focusTimeKpis');
+  if(!wrap) return;
+  const billableMs = state.entries
+    .filter(e => e.billable && e.endMs >= range.start && e.startMs <= range.end)
+    .reduce((s, e) => s + Math.min(e.endMs, range.end) - Math.max(e.startMs, range.start), 0);
+  const totalMs = data.totals.hours * 3600000;
+  const nonBillableMs = Math.max(0, totalMs - billableMs);
+  const tiles = [
+    { value: data.totals.formatted,   label: 'Tracked' },
+    { value: formatHM(billableMs),    label: 'Billable' },
+    { value: formatHM(nonBillableMs), label: 'Non-billable' },
+    { value: data.totals.entryCount,  label: 'Entries' }
+  ];
+  wrap.innerHTML = tiles.map(t => `
+    <div class="kpi-tile">
+      <div class="kpi-value">${esc(String(t.value))}</div>
+      <div class="kpi-label">${esc(t.label)}</div>
+    </div>`).join('');
+}
+
+// Same daily-activity SVG chart as before, retargeted to the new Focus IDs.
+function renderFocusDailyChart(){
+  const wrap = document.getElementById('focusDailyChart');
+  if(!wrap) return;
+  const data = buildDailyRollup(14);
+  const maxMs = Math.max(...data.map(d => d.totalMs), 3600000);
+  const W = 360, H = 160, padTop = 12, padBottom = 22, padLeft = 4, padRight = 4;
+  const chartH = H - padTop - padBottom;
+  const barCount = data.length;
+  const slot = (W - padLeft - padRight) / barCount;
+  const barW = Math.min(20, slot * 0.7);
+
+  let bars = '';
+  let labels = '';
+  data.forEach((d, i) => {
+    const x = padLeft + i * slot + (slot - barW) / 2;
+    const totalH = (d.totalMs / maxMs) * chartH;
+    const billH = (d.billableMs / maxMs) * chartH;
+    const nonBillH = totalH - billH;
+    const yTotal = padTop + chartH - totalH;
+    const yBill = padTop + chartH - billH;
+    const dateStr = new Date(d.dayStart).toLocaleDateString(undefined, { month:'short', day:'numeric' });
+    const tip = `${dateStr} — ${formatHM(d.totalMs)}${d.billableMs > 0 ? ` (${formatHM(d.billableMs)} billable)` : ''}`;
+    if(nonBillH > 0){
+      bars += `<rect class="bar bar-nonbill" x="${x}" y="${yTotal}" width="${barW}" height="${nonBillH}" rx="2"><title>${esc(tip)}</title></rect>`;
+    }
+    if(billH > 0){
+      bars += `<rect class="bar bar-bill" x="${x}" y="${yBill}" width="${barW}" height="${billH}" rx="2"><title>${esc(tip)}</title></rect>`;
+    }
+    if(totalH === 0){
+      bars += `<rect class="bar bar-empty" x="${x}" y="${padTop+chartH-2}" width="${barW}" height="2" rx="1"><title>${esc(tip)} — no entries</title></rect>`;
+    }
+    if(i % 2 === barCount % 2){
+      const dayShort = new Date(d.dayStart).toLocaleDateString(undefined, { weekday:'short' });
+      labels += `<text x="${x + barW/2}" y="${H - 6}" class="axis-label" text-anchor="middle">${esc(dayShort[0])}</text>`;
+    }
+  });
+
+  let grid = '';
+  [0.25, 0.5, 0.75, 1].forEach(frac => {
+    const y = padTop + chartH - chartH * frac;
+    grid += `<line class="grid-line" x1="${padLeft}" y1="${y}" x2="${W-padRight}" y2="${y}" />`;
+  });
+
+  const totalRange = data.reduce((s,d) => s + d.totalMs, 0);
+  const totalBill = data.reduce((s,d) => s + d.billableMs, 0);
+
+  wrap.innerHTML = `
+    <svg viewBox="0 0 ${W} ${H}" class="punch-svg-chart" preserveAspectRatio="xMidYMid meet">
+      ${grid}
+      ${bars}
+      ${labels}
+    </svg>
+    <div class="chart-footer">
+      <span class="chart-legend"><span class="dot dot-bill"></span>Billable</span>
+      <span class="chart-legend"><span class="dot dot-nonbill"></span>Non-billable</span>
+      <span class="chart-footer-total">Total: ${formatHM(totalRange)}${totalBill ? ` · ${formatHM(totalBill)} billable` : ''}</span>
+    </div>`;
+}
+
+// Hours-by-project horizontal bars. Top 5 by default; the full list is reachable
+// from the "View all" button (wired in pagination commit).
+function renderFocusProjectChart(data){
+  const wrap = document.getElementById('focusProjectChart');
+  if(!wrap) return;
+  if(!data.projects.length){
+    wrap.innerHTML = '<div class="insights-empty">No time logged in this period.</div>';
+    return;
+  }
+  const top = data.projects.slice(0, 5);
+  const maxHours = Math.max(...top.map(p => p.hours), 0.01);
+  const colorByName = new Map(state.projects.map(p => [p.name, p.color]));
+  let html = '<div class="proj-bar-list">';
+  for(const p of top){
+    const widthPct = (p.hours / maxHours) * 100;
+    const color = colorByName.get(p.name) || '#666';
+    html += `
+      <div class="proj-bar-row">
+        <div class="proj-bar-label" title="${esc(p.name)}">${esc(p.name)}</div>
+        <div class="proj-bar-track">
+          <div class="proj-bar-fill" style="width:${widthPct}%;background:${esc(color)}"></div>
+        </div>
+        <div class="proj-bar-value mono">${p.hours}h <span class="proj-bar-pct">${p.percent}%</span></div>
+      </div>`;
+  }
+  html += '</div>';
+  if(data.projects.length > top.length){
+    html += `<div class="insights-empty">…and ${data.projects.length - top.length} more — use “View all”.</div>`;
+  }
+  wrap.innerHTML = html;
+}
+
+// ----- Tasks subpane renderers -----
+
+// Tasks-focused KPI tiles: completed in range, active overall, overdue overall.
+function renderFocusTasksKpis(data){
+  const wrap = document.getElementById('focusTasksKpis');
+  if(!wrap) return;
+  const activeTasks = state.tasks.filter(isTaskActive).length;
+  const overdueTasks = state.tasks.filter(t => isTaskActive(t) && t.dueDate && t.dueDate < startOfDay(Date.now())).length;
+  const inFlight = data.incompleteWithTime ? data.incompleteWithTime.length : 0;
+  const tiles = [
+    { value: data.completedTasks.length, label: 'Completed' },
+    { value: inFlight,                   label: 'In flight' },
+    { value: activeTasks,                label: 'Active' },
+    { value: overdueTasks,               label: 'Overdue', tone: overdueTasks > 0 ? 'warn' : '' }
+  ];
+  wrap.innerHTML = tiles.map(t => `
+    <div class="kpi-tile${t.tone ? ' tone-'+t.tone : ''}">
+      <div class="kpi-value">${esc(String(t.value))}</div>
+      <div class="kpi-label">${esc(t.label)}</div>
+    </div>`).join('');
+}
+
+// Compact task list shared by Completed + In Flight cards. Mirrors the old
+// renderInsightsTaskList but caps at 5 instead of 8 — drill-downs handle more.
+function renderFocusTaskList(targetId, items, kind){
+  const wrap = document.getElementById(targetId);
+  if(!wrap) return;
+  if(!items || items.length === 0){
+    const msg = kind === 'completed'
+      ? 'No completed tasks for this range.'
+      : 'No tasks in flight for this range.';
+    wrap.innerHTML = `<div class="insights-empty">${msg}</div>`;
+    return;
+  }
+  const shown = items.slice(0, 5);
+  let html = '';
+  for(const t of shown){
+    const accountSuffix = t.account ? ` · ${esc(t.account)}` : '';
+    if(kind === 'completed'){
+      html += `<div class="insights-item">
+        <span class="insights-item-mark insights-mark-done">✓</span>
+        <div class="insights-item-main">
+          <div class="insights-item-name">${esc(t.name)}</div>
+          <div class="insights-item-sub">${esc(t.project)}${accountSuffix} · ${t.hoursLogged}h logged</div>
+        </div>
+      </div>`;
+    } else {
+      const due = t.dueDate ? ` · due ${new Date(t.dueDate).toLocaleDateString()}` : '';
+      const est = t.estimatedMinutes ? ` · est ${(t.estimatedMinutes/60).toFixed(1)}h` : '';
+      html += `<div class="insights-item">
+        <span class="insights-item-mark insights-mark-flight">⏵</span>
+        <div class="insights-item-main">
+          <div class="insights-item-name">${esc(t.name)}</div>
+          <div class="insights-item-sub">${esc(t.project)} · ${t.hoursLoggedThisPeriod}h this period (${t.hoursLoggedTotal}h total)${est}${due}</div>
+        </div>
+      </div>`;
+    }
+  }
+  if(items.length > shown.length){
+    html += `<div class="insights-empty">…and ${items.length - shown.length} more — use “View all”.</div>`;
+  }
+  wrap.innerHTML = html;
+}
+
+// Top 5 carry-forward + overdue tasks. Full list reachable via "View all".
+function renderFocusCarryForward(items){
+  const wrap = document.getElementById('focusCarryForward');
+  if(!wrap) return;
+  if(!items || items.length === 0){
+    wrap.innerHTML = '<div class="insights-empty">No carry-forward tasks for this range.</div>';
+    return;
+  }
+  const shown = items.slice(0, 5);
+  let html = '';
+  for(const t of shown){
+    const tone = t.overdue ? 'overdue' : '';
+    const due = new Date(t.dueDate).toLocaleDateString();
+    const prio = t.priority ? `<span class="task-priority-badge prio-${esc(t.priority)}" style="margin-left:6px">${esc(t.priority)}</span>` : '';
+    html += `<div class="insights-item ${tone ? 'insights-item-warn' : ''}">
+      <span class="insights-item-mark ${t.overdue ? 'insights-mark-overdue' : 'insights-mark-soon'}">${t.overdue ? '⚠' : '→'}</span>
+      <div class="insights-item-main">
+        <div class="insights-item-name">${esc(t.name)}${prio}</div>
+        <div class="insights-item-sub">${esc(t.project)} · due ${due}${t.overdue ? ' (overdue)' : ''}${t.hoursLoggedTotal > 0 ? ` · ${t.hoursLoggedTotal}h logged` : ''}</div>
+      </div>
+    </div>`;
+  }
+  if(items.length > shown.length){
+    html += `<div class="insights-empty">…and ${items.length - shown.length} more — use “View all”.</div>`;
+  }
+  wrap.innerHTML = html;
+}
+
+// Daily closeouts under Tasks (they capture what was completed and carried forward
+// for each day). Latest call-out + recent five; full history via "View all".
+function renderFocusCloseouts(){
+  const wrap = document.getElementById('focusCloseouts');
+  if(!wrap) return;
+  const history = getCloseoutHistory();
+  if(history.length === 0){
+    wrap.innerHTML = '<div class="insights-empty">No closeouts yet. Click End Day on the Today tab to capture one.</div>';
+    return;
+  }
+  const latest = history[0];
+  const dateStr = new Date(latest.date).toLocaleDateString(undefined, { weekday:'long', month:'short', day:'numeric' });
+  const minutesH = (latest.totalTrackedMinutes / 60).toFixed(1);
+  let html = `
+    <div class="closeout-latest">
+      <div class="closeout-latest-head">
+        <span class="closeout-latest-date">${esc(dateStr)}</span>
+        <span class="closeout-latest-time mono">${minutesH}h tracked · ${latest.entryCount} entries</span>
+      </div>
+      <div class="closeout-latest-summary">${esc(latest.summaryText)}</div>
+      ${latest.coachCardText ? `<div class="closeout-latest-coach">"${esc(latest.coachCardText)}"</div>` : ''}
+      <div class="closeout-latest-stats">
+        <span><strong>${latest.completedTaskIds.length}</strong> completed</span>
+        <span><strong>${latest.carriedForwardTaskIds.length}</strong> carried</span>
+        ${latest.archivedTaskIds && latest.archivedTaskIds.length > 0 ? `<span><strong>${latest.archivedTaskIds.length}</strong> archived</span>` : ''}
+        ${latest.missingNoteEntryIds.length > 0 ? `<span class="closeout-warn"><strong>${latest.missingNoteEntryIds.length}</strong> missing notes</span>` : ''}
+      </div>
+    </div>`;
+  if(history.length > 1){
+    html += '<div class="closeout-history-title">Recent closeouts</div><div class="closeout-history-list">';
+    for(const c of history.slice(1, 6)){
+      const d = new Date(c.date).toLocaleDateString();
+      html += `
+        <div class="closeout-history-row">
+          <span class="closeout-history-date">${esc(d)}</span>
+          <span class="closeout-history-stats">${(c.totalTrackedMinutes/60).toFixed(1)}h · ${c.completedTaskIds.length} done · ${c.carriedForwardTaskIds.length} carried</span>
+        </div>`;
+    }
+    html += '</div>';
+  }
+  wrap.innerHTML = html;
+}
+
+// ----- Quality subpane renderers -----
+
+// Quality KPIs: notes coverage %, missing-notes count, estimate accuracy.
+function renderFocusQualityKpis(data){
+  const wrap = document.getElementById('focusQualityKpis');
+  if(!wrap) return;
+  const total = data.totals.entryCount;
+  const missing = data.totals.entriesMissingNotes || 0;
+  const coverage = total > 0 ? Math.round(((total - missing) / total) * 100) : 0;
+  const tiles = [
+    { value: coverage + '%',  label: 'With notes' },
+    { value: missing,         label: 'Missing notes', tone: missing > 0 ? 'warn' : '' },
+    { value: total,           label: 'Entries' }
+  ];
+  wrap.innerHTML = tiles.map(t => `
+    <div class="kpi-tile${t.tone ? ' tone-'+t.tone : ''}">
+      <div class="kpi-value">${esc(String(t.value))}</div>
+      <div class="kpi-label">${esc(t.label)}</div>
+    </div>`).join('');
+}
+
+// Reuses the old insights-quality logic — flags for missing notes ratio,
+// estimate accuracy, and "time logged but nothing completed".
+function renderFocusQualityFlags(data, range){
+  const wrap = document.getElementById('focusQualityFlags');
+  if(!wrap) return;
+  const flags = [];
+  const missing = data.totals.entriesMissingNotes || 0;
+  if(missing > 0){
+    const pct = Math.round((missing / data.totals.entryCount) * 100);
+    flags.push({ label: `${missing} of ${data.totals.entryCount} entries missing notes (${pct}%)`, tone: pct > 25 ? 'warn' : 'info' });
+  }
+  const tasksWithEst = state.tasks.filter(t => t.completed && t.completedAt >= range.start && t.completedAt <= range.end && t.estimatedMinutes);
+  if(tasksWithEst.length > 0){
+    const ratios = tasksWithEst.map(t => sumTaskMs(t.id) / 60000 / t.estimatedMinutes);
+    const avg = ratios.reduce((s, r) => s + r, 0) / ratios.length;
+    const hitCount = ratios.filter(r => r >= 0.8 && r <= 1.2).length;
+    const tone = avg > 1.5 ? 'warn' : (avg < 0.7 ? 'info' : 'good');
+    flags.push({
+      label: `Estimate accuracy: ${tasksWithEst.length} task${tasksWithEst.length===1?'':'s'} avg ${avg.toFixed(2)}× (${hitCount} within ±20%)`,
+      tone
+    });
+  }
+  if(data.completedTasks.length === 0 && data.totals.entryCount > 0){
+    flags.push({ label: 'Time logged but no tasks completed in this period.', tone: 'info' });
+  }
+  if(flags.length === 0){
+    wrap.innerHTML = '<div class="insights-empty">All clean — nothing flagged.</div>';
+    return;
+  }
+  wrap.innerHTML = flags.map(f => `<div class="quality-flag tone-${esc(f.tone)}">${esc(f.label)}</div>`).join('');
+}
+
+// Placeholder for the missing-notes list. Real implementation lands in commit #5.
+function renderFocusMissingNotes(/* range */){
+  const wrap = document.getElementById('focusMissingNotes');
+  if(!wrap) return;
+  wrap.innerHTML = '<div class="insights-empty">Missing-notes list coming next — use the Log tab for now.</div>';
 }
 
 // ============================================================
@@ -4472,23 +4969,13 @@ function renderSuggestedFocusCard(){
 }
 
 // ------------------------------------------------------------
-// Insights tab
+// Insights data — shared helpers
+//
+// The Insights *tab* was retired in v2.2; its calculations now feed the Focus
+// tab subpanes (Time & Projects, Tasks, Quality). The helper functions below
+// (buildDailyRollup, buildSummaryData consumers, etc.) intentionally stay so
+// that the Focus subpane renderers and the AI Summary export keep working.
 // ------------------------------------------------------------
-function getInsightsRange(){
-  const sel = document.getElementById('insightsRange');
-  const val = sel ? sel.value : 'thisWeek';
-  const now = Date.now();
-  if(val === 'thisWeek') return { start: startOfWeek(now), end: now, label: 'This week' };
-  if(val === 'lastWeek'){
-    const en = startOfWeek(now) - 1;
-    const st = startOfWeek(en);
-    return { start: st, end: startOfWeek(now), label: 'Last week' };
-  }
-  if(val === 'last7') return { start: now - 7*86400000, end: now, label: 'Last 7 days' };
-  if(val === 'last14') return { start: now - 14*86400000, end: now, label: 'Last 14 days' };
-  if(val === 'last30') return { start: now - 30*86400000, end: now, label: 'Last 30 days' };
-  return { start: startOfWeek(now), end: now, label: 'This week' };
-}
 
 // Per-day rollup for the trend chart. Returns array of { dayStart, totalMs,
 // billableMs } in chronological order, length = `days`.
@@ -4517,293 +5004,12 @@ function buildDailyRollup(days){
   return out;
 }
 
-function renderInsights(){
-  const pane = document.querySelector('.tab-pane[data-pane="insights"]');
-  if(!pane) return;
-  const range = getInsightsRange();
-  const data = buildSummaryData(range);
-
-  // Range subtitle (small "<dateA> to <dateB>" hint next to the picker)
-  const subtitle = document.getElementById('insightsRangeLabel');
-  if(subtitle){
-    const sd = new Date(range.start).toLocaleDateString();
-    const ed = new Date(range.end).toLocaleDateString();
-    subtitle.textContent = `${sd} → ${ed}`;
-  }
-
-  renderInsightsKpis(data, range);
-  renderDailyTrendChart();
-  renderProjectBreakdownChart(data);
-  renderInsightsTaskList('insightsCompletedTasks', data.completedTasks, 'completed');
-  renderInsightsTaskList('insightsInFlight', data.incompleteWithTime, 'in-flight');
-  renderInsightsCarryForward(data.carryForward);
-  renderInsightsCloseouts();
-  renderInsightsQuality(data, range);
-  renderAttentionDriftCard();
-}
-
-// Compact today-only focus signals card. The range above covers a week+,
-// but attention drift is most actionable when it's about the day in front
-// of you — keep it focused on today.
-function renderAttentionDriftCard(){
-  const wrap = document.getElementById('attentionDrift');
-  if(!wrap) return;
-  const today = Date.now();
-  const { start, end } = dayWindow(today);
-  const summary = getAttentionDriftSummary(start, end);
-  const noSignals =
-    summary.distractionMs === 0 &&
-    summary.projectSwitches === 0 &&
-    summary.taskSwitches === 0 &&
-    summary.windowChanges === 0 &&
-    summary.suggestedShown === 0;
-  if(noSignals){
-    wrap.innerHTML = '<div class="empty" style="padding:18px">No focus signals captured today yet. Enable app/window tracking in Settings → Focus Tools.</div>';
-    return;
-  }
-  const acceptRate = summary.suggestedShown > 0
-    ? Math.round((summary.suggestedAccepted / summary.suggestedShown) * 100)
-    : null;
-  const blockLabel = `${summary.distractionBlocks} block${summary.distractionBlocks !== 1 ? 's' : ''}`;
-  const cells = [
-    { label: 'Distraction time', value: summary.distractionMs > 0 ? formatDurationMs(summary.distractionMs) : '0m', sub: blockLabel },
-    { label: 'Project switches', value: summary.projectSwitches, sub: '' },
-    { label: 'Task switches', value: summary.taskSwitches, sub: '' },
-    { label: 'App switches', value: summary.windowChanges, sub: '' },
-    { label: 'Suggested accept', value: acceptRate != null ? `${acceptRate}%` : '—', sub: summary.suggestedShown ? `${summary.suggestedAccepted}/${summary.suggestedShown}` : '' }
-  ];
-  wrap.innerHTML = cells.map(c => `
-    <div class="drift-cell">
-      <div class="drift-label">${esc(c.label)}</div>
-      <div class="drift-value">${esc(String(c.value))}</div>
-      ${c.sub ? `<div class="drift-sub">${esc(c.sub)}</div>` : ''}
-    </div>
-  `).join('');
-}
-
-function renderInsightsKpis(data, range){
-  const wrap = document.getElementById('insightsKpis');
-  if(!wrap) return;
-  // Active and overdue task counts are global (not period-bound) — they describe
-  // the current state of the work plan, not historical activity.
-  const activeTasks = state.tasks.filter(isTaskActive).length;
-  const overdueTasks = state.tasks.filter(t => isTaskActive(t) && t.dueDate && t.dueDate < startOfDay(Date.now())).length;
-  const billableMs = state.entries
-    .filter(e => e.billable && e.endMs >= range.start && e.startMs <= range.end)
-    .reduce((s,e) => s + Math.min(e.endMs, range.end) - Math.max(e.startMs, range.start), 0);
-  const totalMs = data.totals.hours * 3600000;
-  const notesCoverage = data.totals.entryCount > 0
-    ? Math.round(((data.totals.entryCount - (data.totals.entriesMissingNotes||0)) / data.totals.entryCount) * 100)
-    : 0;
-
-  const tiles = [
-    { value: data.totals.formatted, label: 'Tracked' },
-    { value: formatHM(billableMs), label: 'Billable' },
-    { value: data.totals.entryCount, label: 'Entries' },
-    { value: data.completedTasks.length, label: 'Tasks done' },
-    { value: activeTasks, label: 'Active tasks' },
-    { value: overdueTasks, label: 'Overdue', tone: overdueTasks > 0 ? 'warn' : '' },
-    { value: notesCoverage + '%', label: 'With notes' }
-  ];
-  wrap.innerHTML = tiles.map(t => `
-    <div class="kpi-tile${t.tone ? ' tone-'+t.tone : ''}">
-      <div class="kpi-value">${esc(String(t.value))}</div>
-      <div class="kpi-label">${esc(t.label)}</div>
-    </div>`).join('');
-}
-
-// Vertical-bar SVG chart of daily activity for the last 14 days. Each day shows
-// a billable (green) segment stacked under non-billable (amber). Bars use a
-// shared scale anchored to the busiest day so quiet days are still readable.
-function renderDailyTrendChart(){
-  const wrap = document.getElementById('insightsDailyChart');
-  if(!wrap) return;
-  const data = buildDailyRollup(14);
-  const maxMs = Math.max(...data.map(d => d.totalMs), 3600000); // floor at 1h so empty weeks don't divide-by-tiny
-  const W = 360, H = 160, padTop = 12, padBottom = 22, padLeft = 4, padRight = 4;
-  const chartH = H - padTop - padBottom;
-  const barCount = data.length;
-  const slot = (W - padLeft - padRight) / barCount;
-  const barW = Math.min(20, slot * 0.7);
-
-  let bars = '';
-  let labels = '';
-  data.forEach((d, i) => {
-    const x = padLeft + i * slot + (slot - barW) / 2;
-    const totalH = (d.totalMs / maxMs) * chartH;
-    const billH = (d.billableMs / maxMs) * chartH;
-    const nonBillH = totalH - billH;
-    const yTotal = padTop + chartH - totalH;
-    const yBill = padTop + chartH - billH;
-    const dateStr = new Date(d.dayStart).toLocaleDateString(undefined, { month:'short', day:'numeric' });
-    const tip = `${dateStr} — ${formatHM(d.totalMs)}${d.billableMs > 0 ? ` (${formatHM(d.billableMs)} billable)` : ''}`;
-    if(nonBillH > 0){
-      bars += `<rect class="bar bar-nonbill" x="${x}" y="${yTotal}" width="${barW}" height="${nonBillH}" rx="2"><title>${esc(tip)}</title></rect>`;
-    }
-    if(billH > 0){
-      bars += `<rect class="bar bar-bill" x="${x}" y="${yBill}" width="${barW}" height="${billH}" rx="2"><title>${esc(tip)}</title></rect>`;
-    }
-    if(totalH === 0){
-      // Show a faint baseline tick for empty days so the axis is readable.
-      bars += `<rect class="bar bar-empty" x="${x}" y="${padTop+chartH-2}" width="${barW}" height="2" rx="1"><title>${esc(tip)} — no entries</title></rect>`;
-    }
-    // X-axis labels — only every other day to avoid crowding.
-    if(i % 2 === barCount % 2){
-      const dayShort = new Date(d.dayStart).toLocaleDateString(undefined, { weekday:'short' });
-      labels += `<text x="${x + barW/2}" y="${H - 6}" class="axis-label" text-anchor="middle">${esc(dayShort[0])}</text>`;
-    }
-  });
-
-  // Horizontal grid lines at 25/50/75% of max for visual reference.
-  let grid = '';
-  [0.25, 0.5, 0.75, 1].forEach(frac => {
-    const y = padTop + chartH - chartH * frac;
-    grid += `<line class="grid-line" x1="${padLeft}" y1="${y}" x2="${W-padRight}" y2="${y}" />`;
-  });
-
-  const totalRange = data.reduce((s,d) => s + d.totalMs, 0);
-  const totalBill = data.reduce((s,d) => s + d.billableMs, 0);
-
-  wrap.innerHTML = `
-    <svg viewBox="0 0 ${W} ${H}" class="punch-svg-chart" preserveAspectRatio="xMidYMid meet">
-      ${grid}
-      ${bars}
-      ${labels}
-    </svg>
-    <div class="chart-footer">
-      <span class="chart-legend"><span class="dot dot-bill"></span>Billable</span>
-      <span class="chart-legend"><span class="dot dot-nonbill"></span>Non-billable</span>
-      <span class="chart-footer-total">Total: ${formatHM(totalRange)}${totalBill ? ` · ${formatHM(totalBill)} billable` : ''}</span>
-    </div>`;
-}
-
-// Horizontal stacked bars for project distribution within the selected period.
-// Each row uses the project's color; widths scale to the period's biggest project
-// so even small projects stay visible.
-function renderProjectBreakdownChart(data){
-  const wrap = document.getElementById('insightsProjectChart');
-  if(!wrap) return;
-  if(!data.projects.length){
-    wrap.innerHTML = '<div class="insights-empty">No time logged in this period.</div>';
-    return;
-  }
-  const maxHours = Math.max(...data.projects.map(p => p.hours), 0.01);
-  // Look up project color by name (project entries in summary data carry the name).
-  // Tiny inefficiency, but only runs once per render.
-  const colorByName = new Map(state.projects.map(p => [p.name, p.color]));
-  let html = '<div class="proj-bar-list">';
-  for(const p of data.projects){
-    const widthPct = (p.hours / maxHours) * 100;
-    const color = colorByName.get(p.name) || '#666';
-    html += `
-      <div class="proj-bar-row">
-        <div class="proj-bar-label" title="${esc(p.name)}">${esc(p.name)}</div>
-        <div class="proj-bar-track">
-          <div class="proj-bar-fill" style="width:${widthPct}%;background:${esc(color)}"></div>
-        </div>
-        <div class="proj-bar-value mono">${p.hours}h <span class="proj-bar-pct">${p.percent}%</span></div>
-      </div>`;
-  }
-  html += '</div>';
-  wrap.innerHTML = html;
-}
-
-function renderInsightsTaskList(targetId, items, kind){
-  const wrap = document.getElementById(targetId);
-  if(!wrap) return;
-  if(!items || items.length === 0){
-    const msg = kind === 'completed' ? 'Nothing completed in this period.' : 'No tasks in flight.';
-    wrap.innerHTML = `<div class="insights-empty">${msg}</div>`;
-    return;
-  }
-  let html = '';
-  // Cap to 8 entries per list — beyond that this becomes a wall of text and the
-  // user should jump to the Tasks tab for the full picture.
-  const shown = items.slice(0, 8);
-  for(const t of shown){
-    const accountSuffix = t.account ? ` · ${esc(t.account)}` : '';
-    if(kind === 'completed'){
-      html += `<div class="insights-item">
-        <span class="insights-item-mark insights-mark-done">✓</span>
-        <div class="insights-item-main">
-          <div class="insights-item-name">${esc(t.name)}</div>
-          <div class="insights-item-sub">${esc(t.project)}${accountSuffix} · ${t.hoursLogged}h logged</div>
-        </div>
-      </div>`;
-    } else {
-      const due = t.dueDate ? ` · due ${new Date(t.dueDate).toLocaleDateString()}` : '';
-      const est = t.estimatedMinutes ? ` · est ${(t.estimatedMinutes/60).toFixed(1)}h` : '';
-      html += `<div class="insights-item">
-        <span class="insights-item-mark insights-mark-flight">⏵</span>
-        <div class="insights-item-main">
-          <div class="insights-item-name">${esc(t.name)}</div>
-          <div class="insights-item-sub">${esc(t.project)} · ${t.hoursLoggedThisPeriod}h this period (${t.hoursLoggedTotal}h total)${est}${due}</div>
-        </div>
-      </div>`;
-    }
-  }
-  if(items.length > shown.length){
-    html += `<div class="insights-empty">…and ${items.length - shown.length} more</div>`;
-  }
-  wrap.innerHTML = html;
-}
-
-function renderInsightsCarryForward(items){
-  const wrap = document.getElementById('insightsCarryForward');
-  if(!wrap) return;
-  if(!items || items.length === 0){
-    wrap.innerHTML = '<div class="insights-empty">Nothing scheduled in the next 7 days.</div>';
-    return;
-  }
-  let html = '';
-  for(const t of items.slice(0, 12)){
-    const tone = t.overdue ? 'overdue' : '';
-    const due = new Date(t.dueDate).toLocaleDateString();
-    const prio = t.priority ? `<span class="task-priority-badge prio-${esc(t.priority)}" style="margin-left:6px">${esc(t.priority)}</span>` : '';
-    html += `<div class="insights-item ${tone ? 'insights-item-warn' : ''}">
-      <span class="insights-item-mark ${t.overdue ? 'insights-mark-overdue' : 'insights-mark-soon'}">${t.overdue ? '⚠' : '→'}</span>
-      <div class="insights-item-main">
-        <div class="insights-item-name">${esc(t.name)}${prio}</div>
-        <div class="insights-item-sub">${esc(t.project)} · due ${due}${t.overdue ? ' (overdue)' : ''}${t.hoursLoggedTotal > 0 ? ` · ${t.hoursLoggedTotal}h logged` : ''}</div>
-      </div>
-    </div>`;
-  }
-  if(items.length > 12){
-    html += `<div class="insights-empty">…and ${items.length - 12} more</div>`;
-  }
-  wrap.innerHTML = html;
-}
-
-function renderInsightsQuality(data, range){
-  const wrap = document.getElementById('insightsQuality');
-  if(!wrap) return;
-  const flags = [];
-  const missing = data.totals.entriesMissingNotes || 0;
-  if(missing > 0){
-    const pct = Math.round((missing / data.totals.entryCount) * 100);
-    flags.push({ label: `${missing} of ${data.totals.entryCount} entries missing notes (${pct}%)`, tone: pct > 25 ? 'warn' : 'info' });
-  }
-  // Estimate accuracy on tasks completed in this period that had estimates.
-  const tasksWithEst = state.tasks.filter(t => t.completed && t.completedAt >= range.start && t.completedAt <= range.end && t.estimatedMinutes);
-  if(tasksWithEst.length > 0){
-    const ratios = tasksWithEst.map(t => sumTaskMs(t.id) / 60000 / t.estimatedMinutes);
-    const avg = ratios.reduce((s,r)=>s+r,0) / ratios.length;
-    const hitCount = ratios.filter(r => r >= 0.8 && r <= 1.2).length;
-    const tone = avg > 1.5 ? 'warn' : (avg < 0.7 ? 'info' : 'good');
-    flags.push({
-      label: `Estimate accuracy: ${tasksWithEst.length} task${tasksWithEst.length===1?'':'s'} avg ${avg.toFixed(2)}× (${hitCount} within ±20%)`,
-      tone
-    });
-  }
-  if(data.completedTasks.length === 0 && data.totals.entryCount > 0){
-    flags.push({ label: 'Time logged but no tasks completed in this period.', tone: 'info' });
-  }
-  if(flags.length === 0){
-    wrap.innerHTML = '<div class="insights-empty">All clean — nothing flagged.</div>';
-    return;
-  }
-  wrap.innerHTML = flags.map(f => `<div class="quality-flag tone-${esc(f.tone)}">${esc(f.label)}</div>`).join('');
-}
+// Legacy renderInsights() / renderInsightsKpis() / renderDailyTrendChart() /
+// renderProjectBreakdownChart() / renderInsightsTaskList() / renderInsightsCarryForward() /
+// renderInsightsQuality() / renderAttentionDriftCard() were removed when the
+// Insights tab was retired in v2.2. Their Focus-subpane equivalents live in the
+// "FOCUS v1 — Tab renderers" section. The data-only helper buildSummaryData()
+// is shared by Focus subpanes and AI Summary.
 
 // ============================================================
 // PRODUCTIVITY — UI: Nudges (popup + settings manager)
@@ -5467,10 +5673,10 @@ function commitEndDayFromModal(){
   currentClosePreview = null;
   currentCloseSelections = {};
   renderAll();
-  // Insights pane only rerenders when re-entered; force a refresh in case the
-  // user is sitting on Insights when they close out.
-  if(document.querySelector('.tab.active')?.dataset.tab === 'insights'){
-    renderInsights();
+  // Focus pane is computed on demand; force a refresh if the user is sitting on
+  // Focus (e.g. Tasks subpane) when they close out so the new closeout appears.
+  if(document.querySelector('.tab.active')?.dataset.tab === 'focus'){
+    renderFocusTab();
   }
   toast('Day closed out');
 }
@@ -5493,48 +5699,8 @@ function jumpToMissingNotesLog(){
   closeModal('endDayModal');
 }
 
-// ----- Insights: closeout history card -----
-
-function renderInsightsCloseouts(){
-  const wrap = document.getElementById('insightsCloseouts');
-  if(!wrap) return;
-  const history = getCloseoutHistory();
-  if(history.length === 0){
-    wrap.innerHTML = '<div class="insights-empty">No closeouts yet. Click End Day on the Today tab to capture one.</div>';
-    return;
-  }
-  const latest = history[0];
-  const dateStr = new Date(latest.date).toLocaleDateString(undefined, { weekday:'long', month:'short', day:'numeric' });
-  const minutesH = (latest.totalTrackedMinutes / 60).toFixed(1);
-  let html = `
-    <div class="closeout-latest">
-      <div class="closeout-latest-head">
-        <span class="closeout-latest-date">${esc(dateStr)}</span>
-        <span class="closeout-latest-time mono">${minutesH}h tracked · ${latest.entryCount} entries</span>
-      </div>
-      <div class="closeout-latest-summary">${esc(latest.summaryText)}</div>
-      ${latest.coachCardText ? `<div class="closeout-latest-coach">"${esc(latest.coachCardText)}"</div>` : ''}
-      <div class="closeout-latest-stats">
-        <span><strong>${latest.completedTaskIds.length}</strong> completed</span>
-        <span><strong>${latest.carriedForwardTaskIds.length}</strong> carried</span>
-        ${latest.archivedTaskIds && latest.archivedTaskIds.length > 0 ? `<span><strong>${latest.archivedTaskIds.length}</strong> archived</span>` : ''}
-        ${latest.missingNoteEntryIds.length > 0 ? `<span class="closeout-warn"><strong>${latest.missingNoteEntryIds.length}</strong> missing notes</span>` : ''}
-      </div>
-    </div>`;
-  if(history.length > 1){
-    html += '<div class="closeout-history-title">Recent closeouts</div><div class="closeout-history-list">';
-    for(const c of history.slice(1, 7)){
-      const d = new Date(c.date).toLocaleDateString();
-      html += `
-        <div class="closeout-history-row">
-          <span class="closeout-history-date">${esc(d)}</span>
-          <span class="closeout-history-stats">${(c.totalTrackedMinutes/60).toFixed(1)}h · ${c.completedTaskIds.length} done · ${c.carriedForwardTaskIds.length} carried</span>
-        </div>`;
-    }
-    html += '</div>';
-  }
-  wrap.innerHTML = html;
-}
+// renderInsightsCloseouts() was removed in v2.2 — see renderFocusCloseouts() on
+// the Tasks subpane for the live implementation.
 
 // ------------------------------------------------------------
 // Settings & Update checker
@@ -5909,8 +6075,7 @@ document.getElementById('miniTimer').addEventListener('click', exitMiniMode);
       document.querySelectorAll('.tab-pane').forEach(x=>x.classList.remove('active'));
       t.classList.add('active');
       document.querySelector(`.tab-pane[data-pane="${t.dataset.tab}"]`).classList.add('active');
-      // Insights is computed on demand — refresh whenever the user lands on it.
-      if(t.dataset.tab === 'insights') renderInsights();
+      // Focus is computed on demand — refresh whenever the user lands on it.
       if(t.dataset.tab === 'focus') renderFocusTab();
     });
   });
@@ -5922,6 +6087,12 @@ document.getElementById('miniTimer').addEventListener('click', exitMiniMode);
       document.querySelectorAll('.focus-range-btn').forEach(x => x.classList.toggle('active', x === btn));
       renderFocusTab();
     });
+  });
+
+  // Focus subnav (Overview / Attention / Time & Projects / Tasks / Quality).
+  // Selected subpane persists for the session.
+  document.querySelectorAll('.focus-subnav-btn').forEach(btn => {
+    btn.addEventListener('click', () => setFocusSubpane(btn.dataset.focusSubpane));
   });
 
   // "Manage rules" jumps to Settings → Focus Tools.
@@ -5948,7 +6119,7 @@ document.getElementById('miniTimer').addEventListener('click', exitMiniMode);
       });
     });
   });
-  document.getElementById('insightsRange').addEventListener('change', renderInsights);
+  // (insightsRange listener removed in v2.2 — Focus range selector replaces it)
   document.querySelectorAll('.task-filter').forEach(btn=>{
     btn.addEventListener('click',()=>{
       document.querySelectorAll('.task-filter').forEach(x=>x.classList.remove('active'));
