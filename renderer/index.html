@@ -86,7 +86,6 @@
       <button class="tab" data-tab="log">Log</button>
       <button class="tab" data-tab="tasks">Tasks</button>
       <button class="tab" data-tab="focus">Focus</button>
-      <button class="tab" data-tab="insights">Insights</button>
       <button class="tab" data-tab="summary">AI Summary</button>
       <button class="tab" data-tab="settings">Settings</button>
     </nav>
@@ -210,6 +209,7 @@
           <div class="focus-range-buttons">
             <button class="focus-range-btn active" data-focus-range="today">Today</button>
             <button class="focus-range-btn" data-focus-range="thisWeek">This week</button>
+            <button class="focus-range-btn" data-focus-range="last7">Last 7 days</button>
           </div>
           <span id="focusRangeLabel" class="hint-inline"></span>
         </div>
@@ -217,92 +217,152 @@
         <button class="btn" id="btnFocusGotoSettings">Manage rules</button>
       </div>
 
-      <div id="focusSummary" class="focus-summary"></div>
+      <nav class="focus-subnav">
+        <button class="focus-subnav-btn active" data-focus-subpane="overview">Overview</button>
+        <button class="focus-subnav-btn" data-focus-subpane="attention">Attention</button>
+        <button class="focus-subnav-btn" data-focus-subpane="time">Time &amp; Projects</button>
+        <button class="focus-subnav-btn" data-focus-subpane="tasks">Tasks</button>
+        <button class="focus-subnav-btn" data-focus-subpane="quality">Quality</button>
+      </nav>
 
-      <div class="focus-grid">
-        <div class="focus-card">
-          <div class="focus-card-title">App &amp; site usage</div>
-          <div id="focusAppUsage" class="focus-usage-list"></div>
+      <!-- OVERVIEW: high-level signals for the selected range -->
+      <div class="focus-subpane active" data-focus-subpane="overview">
+        <div id="focusSummary" class="focus-summary"></div>
+
+        <div class="focus-grid">
+          <div class="focus-card">
+            <div class="focus-card-title">Suggested focus</div>
+            <div id="focusSuggested" class="focus-suggested-inline"></div>
+          </div>
+          <div class="focus-card">
+            <div class="focus-card-title">Intentional breaks <span class="hint-inline">— timed-break nudges</span></div>
+            <div id="focusBreaks" class="focus-breaks"></div>
+          </div>
         </div>
-        <div class="focus-card">
-          <div class="focus-card-title">Top distractions <span class="hint-inline">— matched distraction rules</span></div>
-          <div id="focusDistractions" class="focus-usage-list"></div>
+
+        <div class="focus-grid">
+          <div class="focus-card">
+            <div class="focus-card-title">Time by category</div>
+            <div id="focusCategoryBreakdown" class="focus-usage-list"></div>
+          </div>
+          <div class="focus-card">
+            <div class="focus-card-title">Today's biggest signal</div>
+            <div id="focusBiggestSignal" class="focus-biggest-signal"></div>
+          </div>
         </div>
       </div>
 
-      <div class="focus-grid">
+      <!-- ATTENTION: where attention went and what pulled it away -->
+      <div class="focus-subpane" data-focus-subpane="attention">
+        <div id="focusAttentionDriftCard" class="focus-card">
+          <div class="focus-card-title">Attention drift <span class="hint-inline">— for this range</span></div>
+          <div id="focusAttentionDrift" class="attention-drift"></div>
+        </div>
+
+        <div class="focus-grid">
+          <div class="focus-card">
+            <div class="focus-card-title">
+              App &amp; site usage
+              <button class="link-btn" data-focus-viewall="appUsage" style="float:right">View all</button>
+            </div>
+            <div id="focusAppUsage" class="focus-usage-list"></div>
+          </div>
+          <div class="focus-card">
+            <div class="focus-card-title">
+              Top distractions <span class="hint-inline">— matched distraction rules</span>
+              <button class="link-btn" data-focus-viewall="distractions" style="float:right">View all</button>
+            </div>
+            <div id="focusDistractions" class="focus-usage-list"></div>
+          </div>
+        </div>
+
         <div class="focus-card">
           <div class="focus-card-title">Idle time</div>
           <div id="focusIdle" class="focus-idle"></div>
         </div>
+
         <div class="focus-card">
-          <div class="focus-card-title">Suggested focus</div>
-          <div id="focusSuggested" class="focus-suggested-inline"></div>
+          <div class="focus-card-title">
+            Recent focus events <span class="hint-inline">— latest 10</span>
+            <button class="link-btn" data-focus-viewall="focusEvents" style="float:right">View all events</button>
+          </div>
+          <div id="focusRecent" class="focus-recent"></div>
         </div>
       </div>
 
-      <div class="focus-card">
-        <div class="focus-card-title">Intentional breaks <span class="hint-inline">— timed-break nudges</span></div>
-        <div id="focusBreaks" class="focus-breaks"></div>
+      <!-- TIME & PROJECTS: where tracked time went -->
+      <div class="focus-subpane" data-focus-subpane="time">
+        <div id="focusTimeKpis" class="insights-kpis"></div>
+
+        <div class="focus-grid">
+          <div class="focus-card">
+            <div class="focus-card-title">Daily activity <span class="hint-inline">— last 14 days</span></div>
+            <div id="focusDailyChart" class="insights-chart"></div>
+          </div>
+          <div class="focus-card">
+            <div class="focus-card-title">
+              Hours by project
+              <button class="link-btn" data-focus-viewall="projects" style="float:right">View all</button>
+            </div>
+            <div id="focusProjectChart" class="insights-chart"></div>
+          </div>
+        </div>
       </div>
 
-      <div class="focus-card">
-        <div class="focus-card-title">Recent focus events <span class="hint-inline">— last 20</span></div>
-        <div id="focusRecent" class="focus-recent"></div>
-      </div>
-    </div>
+      <!-- TASKS: what moved forward, what still needs attention -->
+      <div class="focus-subpane" data-focus-subpane="tasks">
+        <div id="focusTasksKpis" class="insights-kpis"></div>
 
-    <!-- INSIGHTS -->
-    <div class="tab-pane" data-pane="insights">
-      <div class="insights-toolbar">
-        <div class="field-inline">
-          <label class="field-label">Period</label>
-          <select id="insightsRange" class="punch-select">
-            <option value="thisWeek" selected>This week</option>
-            <option value="lastWeek">Last week</option>
-            <option value="last7">Last 7 days</option>
-            <option value="last14">Last 14 days</option>
-            <option value="last30">Last 30 days</option>
-          </select>
-          <span id="insightsRangeLabel" class="hint-inline"></span>
+        <div class="focus-grid">
+          <div class="focus-card">
+            <div class="focus-card-title">
+              Tasks completed
+              <button class="link-btn" data-focus-viewall="completedTasks" style="float:right">View all</button>
+            </div>
+            <div id="focusCompletedTasks" class="insights-list"></div>
+          </div>
+          <div class="focus-card">
+            <div class="focus-card-title">
+              In flight <span class="hint-inline">— time logged, not yet done</span>
+              <button class="link-btn" data-focus-viewall="inFlight" style="float:right">View all</button>
+            </div>
+            <div id="focusInFlight" class="insights-list"></div>
+          </div>
+        </div>
+
+        <div class="focus-card">
+          <div class="focus-card-title">
+            Carry forward <span class="hint-inline">— overdue + due in next 7 days</span>
+            <button class="link-btn" data-focus-viewall="carryForward" style="float:right">View all</button>
+          </div>
+          <div id="focusCarryForward" class="insights-list"></div>
+        </div>
+
+        <div class="focus-card">
+          <div class="focus-card-title">
+            Daily closeouts <span class="hint-inline">— most recent first</span>
+            <button class="link-btn" data-focus-viewall="closeouts" style="float:right">View all</button>
+          </div>
+          <div id="focusCloseouts" class="closeouts-wrap"></div>
         </div>
       </div>
-      <div id="insightsKpis" class="insights-kpis"></div>
-      <div class="insights-card" id="attentionDriftCard">
-        <div class="insights-card-title">Attention drift <span class="hint-inline">— today's focus signals</span></div>
-        <div id="attentionDrift" class="attention-drift"></div>
-      </div>
-      <div class="insights-grid">
-        <div class="insights-card">
-          <div class="insights-card-title">Daily activity <span class="hint-inline">— last 14 days</span></div>
-          <div id="insightsDailyChart" class="insights-chart"></div>
+
+      <!-- QUALITY: how clean the tracking data is -->
+      <div class="focus-subpane" data-focus-subpane="quality">
+        <div id="focusQualityKpis" class="insights-kpis"></div>
+
+        <div class="focus-card insights-quality">
+          <div class="focus-card-title">Data quality flags</div>
+          <div id="focusQualityFlags"></div>
         </div>
-        <div class="insights-card">
-          <div class="insights-card-title">Hours by project</div>
-          <div id="insightsProjectChart" class="insights-chart"></div>
+
+        <div class="focus-card">
+          <div class="focus-card-title">
+            Entries missing notes
+            <button class="link-btn" data-focus-viewall="missingNotes" style="float:right">View all</button>
+          </div>
+          <div id="focusMissingNotes" class="insights-list"></div>
         </div>
-      </div>
-      <div class="insights-grid">
-        <div class="insights-card">
-          <div class="insights-card-title">Tasks completed</div>
-          <div id="insightsCompletedTasks" class="insights-list"></div>
-        </div>
-        <div class="insights-card">
-          <div class="insights-card-title">In flight <span class="hint-inline">— time logged, not yet done</span></div>
-          <div id="insightsInFlight" class="insights-list"></div>
-        </div>
-      </div>
-      <div class="insights-card">
-        <div class="insights-card-title">Carry forward <span class="hint-inline">— overdue + due in next 7 days</span></div>
-        <div id="insightsCarryForward" class="insights-list"></div>
-      </div>
-      <div class="insights-card">
-        <div class="insights-card-title">Daily closeouts <span class="hint-inline">— most recent first</span></div>
-        <div id="insightsCloseouts" class="closeouts-wrap"></div>
-      </div>
-      <div class="insights-card insights-quality">
-        <div class="insights-card-title">Quality</div>
-        <div id="insightsQuality"></div>
       </div>
     </div>
 
@@ -1058,6 +1118,18 @@
   </div>
 
   <!-- What's New Modal -->
+  <!-- Generic paginated drill-down modal — used by Focus "View all" buttons -->
+  <div id="focusListModal" class="modal-overlay">
+    <div class="modal" style="max-width: 720px;">
+      <div class="modal-title" id="focusListModalTitle">All items</div>
+      <div id="focusListModalBody" style="max-height: 480px; overflow-y: auto; padding: 0 4px;"></div>
+      <div class="modal-actions">
+        <div id="focusListModalPager" class="focus-list-modal-pager"></div>
+        <button class="btn" id="btnCloseFocusListModal">Close</button>
+      </div>
+    </div>
+  </div>
+
   <div id="whatsNewModal" class="modal-overlay">
     <div class="modal" style="max-width: 600px;">
       <div class="modal-title">🎉 What's New in Punch <span id="whatsNewVersion"></span></div>

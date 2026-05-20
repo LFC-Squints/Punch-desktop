@@ -1230,6 +1230,69 @@ body.widget-mode .full-view { display: none; }
 .focus-range-btn:hover { color: var(--text); }
 .focus-range-btn.active { color: var(--amber); background: var(--amber-dim); }
 
+/* Focus tab — sub-navigation (Overview / Attention / Time & Projects / Tasks / Quality) */
+.focus-subnav {
+  display: flex; gap: 2px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+.focus-subnav-btn {
+  padding: 8px 14px;
+  font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.12em;
+  color: var(--text-dim);
+  background: transparent;
+  border-radius: 5px;
+  transition: background 0.12s, color 0.12s;
+  white-space: nowrap;
+}
+.focus-subnav-btn:hover { color: var(--text); background: var(--surface-2); }
+.focus-subnav-btn.active { color: var(--amber); background: var(--amber-dim); }
+
+.focus-subpane { display: none; }
+.focus-subpane.active { display: block; }
+
+/* Overview: "Today's biggest signal" tile */
+.focus-biggest-signal { padding: 4px 0; }
+.focus-signal-line { font-size: 13px; margin-bottom: 6px; color: var(--text); line-height: 1.4; }
+.focus-signal-sub  { font-size: 11px; color: var(--text-dim); line-height: 1.4; }
+.focus-signal-tag {
+  display: inline-block; padding: 2px 8px;
+  font-size: 9px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  border-radius: 4px; margin-right: 6px;
+  vertical-align: 1px;
+}
+.focus-signal-tag.warn { background: rgba(227,91,91,0.18); color: var(--red, #e35b5b); }
+.focus-signal-tag.info { background: rgba(152,116,227,0.18); color: var(--purple, #9874e3); }
+.focus-signal-tag.good { background: rgba(84,221,125,0.18); color: var(--green, #54dd7d); }
+
+/* "View all" link button used in Focus card titles */
+.link-btn {
+  background: transparent; border: none;
+  color: var(--amber); font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  padding: 2px 6px; border-radius: 4px;
+  cursor: pointer;
+}
+.link-btn:hover { background: var(--amber-dim); }
+
+/* Focus list modal pager */
+.focus-list-modal-pager {
+  display: flex; align-items: center; gap: 10px;
+  flex: 1; font-size: 11px; color: var(--text-dim);
+}
+.focus-list-modal-pager button {
+  background: var(--surface-2); border: 1px solid var(--border);
+  color: var(--text); padding: 4px 10px; border-radius: 4px;
+  font-size: 11px; cursor: pointer;
+}
+.focus-list-modal-pager button:disabled { opacity: 0.4; cursor: default; }
+
 .focus-summary,
 .focus-breaks {
   display: grid;
