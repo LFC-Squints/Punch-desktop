@@ -1,6 +1,6 @@
 {
   "name": "punch-desktop",
-  "version": "2.1.2",
+  "version": "2.1.3",
   "description": "Self-hosted desktop time tracker with subcategories, tasks, accounts, hotkeys, nudges, daily closeouts, and AI summary export",
   "main": "main.js",
   "scripts": {

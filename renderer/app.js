@@ -6311,6 +6311,70 @@ function updateMiniTimer() {
 // What's New Modal
 // ------------------------------------------------------------
 const WHATS_NEW_CONTENT = {
+  '2.1.2': `
+    <h3>🔔 Nudge types</h3>
+    <ul>
+      <li><strong>Reminder</strong> — unchanged: pops up on an interval, you hit Done or Snooze</li>
+      <li><strong>Timed Break</strong> — new: click "Start Xm break" to log a break and start a countdown. Break time is tracked in the new Intentional Breaks card on the Focus tab.</li>
+      <li><strong>Action Prompt</strong> — new: a timed reminder to switch context. Assign a project and task in the nudge settings; when it fires, click "Start · Project Name" to immediately begin a timer for that work.</li>
+    </ul>
+
+    <h3>⏱ Nudge scheduling fix</h3>
+    <ul>
+      <li>Nudges no longer fire in a burst when you reopen the app after being away — each nudge is now scheduled forward from the current time on startup, so the full interval always elapses before anything fires</li>
+    </ul>
+
+    <h3>🎯 Focus UI cleanup</h3>
+    <ul>
+      <li>Attention Drift card now shows <strong>Distraction time</strong> and <strong>App switches</strong> instead of the redundant "Most Used App"</li>
+      <li>Top Distractions now shows block counts (e.g. "Chrome · 1h 12m · 8 blocks") so you can see frequency vs duration at a glance</li>
+      <li>Manual "Log Distraction" button removed — distractions are now tracked automatically via Activity Rules</li>
+      <li>New <strong>Intentional Breaks</strong> card on Focus: total break time, number of breaks, and average duration for the selected period</li>
+    </ul>
+
+    <h3>🛠 Installer fix</h3>
+    <ul>
+      <li>Fixed the "cannot close Punch — Retry / Cancel" loop that appeared when running the installer while Punch was running in the tray</li>
+      <li>Fixed: Punch now restarts automatically after installing an update from Settings → Check for updates</li>
+    </ul>
+  `,
+
+  '2.0.0': `
+    <h3>🔍 Focus tab</h3>
+    <ul>
+      <li>New <strong>Focus</strong> tab replaces the old Insights tab — built around understanding where your attention actually goes</li>
+      <li>Live window and app activity detection: Punch tracks which app/window is in the foreground and how long you stay there</li>
+      <li>Period selector (Today / Yesterday / This week / Last week / Last 7 / 14 / 30 days) applies to all Focus cards</li>
+    </ul>
+
+    <h3>🏷 Activity Rules</h3>
+    <ul>
+      <li>Define rules to label any app or site as <strong>Work, Communication, Distraction, Utility, Break,</strong> or a custom category</li>
+      <li>Match by app name, window title, or both — rules run in priority order</li>
+      <li>Manage rules in <strong>Settings → Focus Tools → Activity Rules</strong></li>
+    </ul>
+
+    <h3>📊 Focus cards</h3>
+    <ul>
+      <li><strong>App &amp; Site Usage</strong> — time-ranked rollup of every app you used, grouped by your activity rules</li>
+      <li><strong>Top Distractions</strong> — apps and sites labelled as Distraction, sorted by time lost</li>
+      <li><strong>Attention Drift</strong> — distraction time, app switches, and idle time for the period</li>
+      <li><strong>Unlogged Work Detection</strong> — if you've been active in a Work-labelled app for the threshold time without a running timer, Punch prompts you to log it</li>
+    </ul>
+
+    <h3>⚙️ Settings restructure</h3>
+    <ul>
+      <li>Settings split into four focused panes: <strong>Workspace Setup, Focus Tools, Data &amp; Backup, App Preferences</strong></li>
+      <li>Projects management moved into Workspace Setup (no longer a standalone tab)</li>
+      <li>New: Subcategories admin, Activity Rules manager, Focus tracking opt-in</li>
+    </ul>
+
+    <h3>🔧 Under the hood</h3>
+    <ul>
+      <li>Schema bumped to v3 and v4 — adds <code>focusEvents[]</code>, <code>activityRules[]</code>, and a <code>settings.focus</code> namespace. Existing data auto-upgrades on load.</li>
+    </ul>
+  `,
+
   '1.5.0': `
     <h3>🎯 Nudges &amp; breaks</h3>
     <ul>
